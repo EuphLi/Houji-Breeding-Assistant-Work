@@ -1,0 +1,296 @@
+// MdPreview 统一样式覆盖 - 扁平化风格
+.flat-md-preview {
+  &.md-editor,
+  .md-editor {
+    background: transparent;
+  }
+
+  .md-editor-preview-wrapper {
+    padding: 0;
+  }
+
+  .md-editor-preview-wrapper .md-editor-preview {
+    font-size: 15.5px;
+    line-height: 1.85;
+    color: var(--gray-1000);
+    padding: 0;
+    max-width: 100%;
+    word-break: break-word;
+    overflow-wrap: break-word;
+
+    font-family:
+      'Segoe UI',
+      'Microsoft YaHei UI',
+      'Microsoft YaHei',
+      'DengXian',
+      'PingFang SC',
+      'Noto Sans SC',
+      sans-serif;
+
+    p {
+      margin: 0.65em 0;
+    }
+
+    p:first-child {
+      margin-top: 0;
+    }
+
+    p:last-child {
+      margin-bottom: 0;
+    }
+
+    h1,
+    h2 {
+      font-size: 1.22rem;
+      line-height: 1.5;
+      margin: 1.4em 0 0.7em;
+      font-weight: 650;
+      color: var(--gray-1000);
+    }
+
+    h3 {
+      font-size: 1.14rem;
+      line-height: 1.5;
+      margin: 1.2em 0 0.6em;
+      font-weight: 650;
+      color: var(--gray-1000);
+    }
+
+    h4,
+    h5,
+    h6 {
+      font-size: 1.04rem;
+      line-height: 1.5;
+      margin: 1em 0 0.5em;
+      font-weight: 650;
+      color: var(--gray-1000);
+    }
+
+    strong {
+      font-weight: 650;
+      color: var(--gray-1000);
+    }
+
+    hr {
+      margin: 1.2em 0;
+      border: none;
+      border-top: 1px solid var(--gray-200);
+    }
+
+    ul,
+    ol {
+      padding-left: 1.55rem;
+      margin: 0.65em 0;
+    }
+
+    li {
+      margin: 0.28em 0;
+      padding-left: 0.1rem;
+    }
+
+    li > p,
+    ol > p,
+    ul > p {
+      margin: 0.25rem 0;
+    }
+
+    ul li::marker,
+    ol li::marker {
+      color: var(--main-bright);
+    }
+
+    a {
+      color: var(--main-700);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(0, 120, 160, 0.18);
+      transition: all 0.15s ease;
+
+      &:hover {
+        color: var(--main-color);
+        border-bottom-color: var(--main-color);
+      }
+    }
+
+    blockquote {
+      margin: 1em 0;
+      padding: 0.75em 1em;
+      color: var(--gray-800);
+      background: var(--gray-25);
+      border-left: 4px solid var(--main-bright);
+      border-radius: 8px;
+    }
+
+    // =====================
+    // 表格样式：内容单行 + 表格自身横向滚动 + 无右侧空白
+    // =====================
+    table {
+      display: block;
+
+      // 核心：不要 width: 100%，否则短表格右侧会出现空白
+      width: fit-content;
+      min-width: auto;
+      max-width: 100%;
+
+      margin: 1.45em 0;
+      font-size: 14.5px;
+      line-height: 1.7;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--gray-200);
+      border-radius: 14px;
+
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+
+      background: var(--gray-0);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.045);
+      table-layout: auto;
+
+      scrollbar-width: thin;
+      scrollbar-color: var(--gray-200) transparent;
+
+      &::-webkit-scrollbar {
+        height: 6px;
+      }
+
+      &::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      &::-webkit-scrollbar-thumb {
+        background: var(--gray-200);
+        border-radius: 10px;
+      }
+    }
+
+    // 保持原生表格结构，避免表头和内容列错位
+    table thead {
+      display: table-header-group;
+    }
+
+    table tbody {
+      display: table-row-group;
+    }
+
+    table tr {
+      display: table-row;
+    }
+
+    table th,
+    table td {
+      display: table-cell;
+    }
+
+    thead tr {
+      background: linear-gradient(180deg, var(--gray-25), var(--gray-50));
+    }
+
+    thead th {
+      padding: 13px 14px;
+      font-weight: 650;
+      color: var(--gray-900);
+      border: none;
+      border-bottom: 1px solid var(--gray-200);
+      border-right: 1px solid rgba(0, 0, 0, 0.045);
+      text-align: center;
+      vertical-align: middle;
+
+      white-space: nowrap;
+      word-break: keep-all;
+      overflow-wrap: normal;
+    }
+
+    thead th:last-child {
+      border-right: none;
+    }
+
+    tbody td {
+      padding: 13px 14px;
+      color: var(--gray-900);
+      border: none;
+      border-bottom: 1px solid var(--gray-100);
+      border-right: 1px solid rgba(0, 0, 0, 0.035);
+      vertical-align: middle;
+      background: var(--gray-0);
+
+      white-space: nowrap;
+      word-break: keep-all;
+      overflow-wrap: normal;
+    }
+
+    tbody td:last-child {
+      border-right: none;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    tbody tr:hover td {
+      background: var(--gray-25);
+    }
+
+    tbody td {
+      text-align: left;
+    }
+
+    tbody td.cell-short {
+      text-align: center;
+      vertical-align: middle;
+      padding-left: 10px;
+      padding-right: 10px;
+    }
+
+    tbody td.cell-long {
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    td a {
+      color: var(--main-700);
+      text-decoration: none;
+      border-bottom: 1px solid rgba(0, 120, 160, 0.18);
+
+      &:hover {
+        color: var(--main-color);
+        border-bottom-color: var(--main-color);
+      }
+    }
+
+    // 代码块
+    .md-editor-code {
+      border: 1px solid var(--gray-100);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--gray-25);
+
+      .md-editor-code-head {
+        background-color: var(--gray-50);
+        z-index: 1;
+
+        .md-editor-collapse-tips {
+          color: var(--gray-400);
+        }
+      }
+    }
+
+    // 行内代码
+    code {
+      font-size: 13px;
+      font-family:
+        'Cascadia Code',
+        'Consolas',
+        'Menlo',
+        'Monaco',
+        monospace;
+      line-height: 1.55;
+      letter-spacing: 0.01em;
+      tab-size: 4;
+      -moz-tab-size: 4;
+      background-color: var(--gray-25);
+      border-radius: 4px;
+      padding: 0.12em 0.34em;
+    }
+  }
+}

@@ -1,0 +1,97 @@
+/* 主题色方案 - 紫色与绿色两套完整色阶（浅色模式） */
+
+/* 紫色主题 - 浅色模式 */
+:root[data-accent="purple"] {
+  --main-1000: #1a052e;
+  --main-900: #2e0b4e;
+  --main-800: #4a0d7a;
+  --main-700: #6b21a8;
+  --main-600: #7c3aed;
+  --main-500: #8b5cf6;
+  --main-400: #a78bfa;
+  --main-300: #c4b5fd;
+  --main-200: #ddd6fe;
+  --main-100: #ede9fe;
+  --main-50: #f5f3ff;
+  --main-40: #f7f5ff;
+  --main-30: #faf9ff;
+  --main-20: #f9f8ff;
+  --main-10: #fcfaff;
+  --main-5: #fefdff;
+  --main-1: #fffeff;
+  --main-0: #ffffff;
+  --main-color: var(--main-500);
+  --main-bright: #7c3aed;
+  --sub-color: #ec4899;
+
+  /* Ant Design 兼容变量 */
+  --color-primary-50: var(--main-50);
+  --color-primary-100: var(--main-200);
+  --color-primary-500: var(--main-500);
+  --color-primary-700: var(--main-700);
+  --color-primary-900: var(--main-900);
+}
+
+/* 绿色主题 - 浅色模式 */
+:root[data-accent="green"] {
+  --main-1000: #002a17;
+  --main-900: #004d2b;
+  --main-800: #006b3d;
+  --main-700: #008f51;
+  --main-600: #10a96b;
+  --main-500: #22c586;
+  --main-400: #4dd996;
+  --main-300: #6ee7b7;
+  --main-200: #a7f3d0;
+  --main-100: #d1fae5;
+  --main-50: #ecfdf5;
+  --main-40: #f0fdf4;
+  --main-30: #f6fdf9;
+  --main-20: #f5fdf8;
+  --main-10: #fafffd;
+  --main-5: #fdfffe;
+  --main-1: #feffff;
+  --main-0: #ffffff;
+  --main-color: var(--main-500);
+  --main-bright: #10a96b;
+  --sub-color: #4dd996;
+
+  /* Ant Design 兼容变量 */
+  --color-primary-50: var(--main-50);
+  --color-primary-100: var(--main-200);
+  --color-primary-500: var(--main-500);
+  --color-primary-700: var(--main-700);
+  --color-primary-900: var(--main-900);
+}
+
+/* 金色主题 - 浅色模式 */
+:root[data-accent="gold"] {
+  --main-1000: #2a1805;
+  --main-900: #3d2408;
+  --main-800: #57360a;
+  --main-700: #7a4a0f;
+  --main-600: #9c6312;
+  --main-500: #c07d18;
+  --main-400: #d89828;
+  --main-300: #e5b048;
+  --main-200: #f5d88a;
+  --main-100: #faecc0;
+  --main-50: #fdf5e0;
+  --main-40: #fdf7e8;
+  --main-30: #fef9f0;
+  --main-20: #fefaf5;
+  --main-10: #fefcfa;
+  --main-5: #fffefd;
+  --main-1: #fffffe;
+  --main-0: #ffffff;
+  --main-color: var(--main-500);
+  --main-bright: #d89828;
+  --sub-color: #e5b048;
+
+  /* Ant Design 兼容变量 */
+  --color-primary-50: var(--main-50);
+  --color-primary-100: var(--main-200);
+  --color-primary-500: var(--main-500);
+  --color-primary-700: var(--main-700);
+  --color-primary-900: var(--main-900);
+}

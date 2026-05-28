@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+# 用文件后缀判断 artifact 类型，后续前端可以据此决定是按 JSON、Markdown、表格还是普通文件展示
+def _artifact_type(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+
+    if suffix == ".json":
+        return "json"
+    if suffix in {".md", ".markdown"}:
+        return "markdown"
+    if suffix in {".tsv", ".csv"}:
+        return "table"
+
+    return "file"
+
+
+# 展示适配层。它不生成新结论，只整理已有 final_result
+# 这样后续 Vue 页面只需要读这些 panel，不需要自己理解后端内部结构
+def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
+    """将 final_result 转换为前端方案 5 需要的展示结构。
+
+    这个函数不做业务推理，不修改 Guard 结果，不重新生成 citation。
+    它只做展示层字段整理，方便后续 Vue 页面或 API 直接消费。
+    """
+
+    guard_result = final_result.get("guard_result") or {}
+    citations = _as_list(final_result.get("citations"))
+    literature_cards = _as_list(final_result.get("literature_cards"))
+    claim_trace = _as_list(final_result.get("claim_trace"))
+    artifacts = _as_list(final_result.get("artifacts"))
+
+    # citation_index 的作用是把 [T1] / [L1] 这种 citation id 映射回完整来源信息。
+    # 这样 claim_trace_rows 里每一条 claim 都可以带上对应 source
+    citation_index = {
+        item.get("citation_id"): {
+            "citation_id": item.get("citation_id", ""),
+            "source_type": item.get("source_type", ""),
+            "text": item.get("text", ""),
+            "metadata": item.get("metadata") or {},
+        }
+        for item in citations
+        if isinstance(item, dict) and item.get("citation_id")
+    }
+
+    claim_trace_rows = []
+    for item in claim_trace:
+        if not isinstance(item, dict):
+            continue
+
+        citation_ids = _as_list(item.get("citation_ids"))
+        claim_trace_rows.append(
+            {
+                "claim_id": item.get("claim_id", ""),
+                "text": item.get("text", ""),
+                "citation_ids": citation_ids,
+                "source_status": item.get("source_status", "uncited"),
+                "sources": [
+                    citation_index[citation_id]
+                    for citation_id in citation_ids
+                    if citation_id in citation_index
+                ],
+            }
+        )
+
+    artifact_links = []
+    for path in artifacts:
+        path_text = str(path)
+        artifact_links.append(
+            {
+                "name": Path(path_text).name,
+                "path": path_text,
+                "type": _artifact_type(path_text),
+            }
+        )
+
+    return {
+        "schema_version": "omics_frontend_payload.v1",
+        "status": final_result.get("status", ""),
+        "backend": final_result.get("backend", ""),
+        "llamaindex_available": bool(final_result.get("llamaindex_available")),
+        "answer_markdown": final_result.get("answer_markdown", ""),
+        "summary": final_result.get("summary") or {},
+        "warnings": _as_list(final_result.get("warnings")),
+        "literature_cards": literature_cards,
+        "citation_panel": {
+            "citations": list(citation_index.values()),
+            "citation_count": len(citation_index),
+        },
+        "literature_panel": {
+            "cards": literature_cards,
+            "card_count": len(literature_cards),
+        },
+        "claim_trace_panel": {
+            "rows": claim_trace_rows,
+            "row_count": len(claim_trace_rows),
+            "supported_count": sum(
+                1 for row in claim_trace_rows if row["source_status"] == "supported"
+            ),
+            "uncited_count": sum(
+                1 for row in claim_trace_rows if row["source_status"] == "uncited"
+            ),
+        },
+        "guard_panel": {
+            "passed": bool(guard_result.get("passed")),
+            "errors": _as_list(guard_result.get("errors")),
+            "warnings": _as_list(guard_result.get("warnings")),
+            "unsupported_dois": _as_list(guard_result.get("unsupported_dois")),
+            "unsupported_quoted_sentences": _as_list(
+                guard_result.get("unsupported_quoted_sentences")
+            ),
+        },
+        "artifact_panel": {
+            "artifacts": artifact_links,
+            "artifact_count": len(artifact_links),
+        },
+    }

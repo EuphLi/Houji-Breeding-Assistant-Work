@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from .context import OmicsBreedingAnalysisContext
+from .evidence_adapters import build_omics_evidence_pack_from_context
+from .evidence_pack import write_evidence_pack
+from .tool_result_adapters import build_omics_evidence_pack_from_tool_results
+
+import json
+from .output_guard import run_dynamic_output_guard
+
+from .citation_engine import build_citation_result
+from .presentation import build_frontend_payload
+from .literature_search import search_background_literature
+
+"""
+实现一条稳定的后端证据准备链路：
+Context / 旧 Tool 结果
+↓
+Evidence Adapter / Tool Result Adapter
+↓
+Evidence Pack
+↓
+omics_evidence_pack.json
+↓
+summary / artifacts
+"""
+
+
+'''
+workflow.py 的 Evidence Pack 准备层:
+1. 调用 evidence_adapters 构建基础 Evidence Pack。
+2. 调用 PubMed 背景文献检索。
+3. 把 PubMed records 合并进 Evidence Pack。
+4. 写出 omics_evidence_pack.json。
+5. 生成 summary。
+6. 生成 warnings。
+'''
+# 把完整 Evidence Pack 压缩成一个摘要
+def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
+    """生成 Evidence Pack 的轻量摘要，方便后续 graph、前端和测试使用。"""
+
+    # 先拆 Evidence Pack 的几个核心区
+    targets = evidence_pack.get("targets") or {}
+    evidence = evidence_pack.get("evidence") or {}
+    # Guard 需要遵守的边界，例如允许 DOI、是否需要群体验证建议。
+    guard_requirements = evidence_pack.get("guard_requirements") or {}
+
+    # 后拆证据文件数量统计的来源
+    transcriptome_records = evidence.get("transcriptome") or []
+    literature_records = evidence.get("literature") or []
+    metabolome_context = evidence.get("metabolome_context") or []
+    genome_context = evidence.get("genome_context") or []
+    literature_debug = ((evidence_pack.get("debug") or {}).get("literature") or {})
+    # 路径诊断的来源
+    input_debug = ((evidence_pack.get("debug") or {}).get("inputs") or {})
+    smoke_debug = ((evidence_pack.get("debug") or {}).get("smoke_context") or {})
+    # PubMed 背景文献摘要来自这里，由这一层统计，再被下游 citation_engine.py 用进正文。
+    background_literature_records = evidence_pack.get("background_literature_records") or []
+    background_literature_search = evidence_pack.get("background_literature_search") or {}
+
+    return {
+        "trait": (evidence_pack.get("task") or {}).get("trait") or input_debug.get("trait", ""),
+        "question": (evidence_pack.get("task") or {}).get("question")
+        or input_debug.get("question", ""),
+        "data_source": input_debug.get("data_source", "") or input_debug.get("evidence_level", ""),
+        "target_genes": targets.get("genes") or [],
+        "trait_terms": targets.get("trait_terms") or [],
+        "transcriptome_record_count": len(transcriptome_records),
+        "literature_record_count": len(literature_records),
+        "metabolome_context_count": len(metabolome_context),
+        "genome_context_count": len(genome_context),
+        "data_dir": input_debug.get("data_dir", ""),
+        "must_include_population_validation": bool(
+            guard_requirements.get("must_include_population_validation")
+        ),
+        "allowed_doi_count": len(guard_requirements.get("allowed_dois") or []),
+        "allowed_quoted_sentence_count": len(
+            guard_requirements.get("allowed_quoted_sentences") or []
+        ),
+        "literature_evidence_path": literature_debug.get("literature_evidence_path", ""),
+        "literature_path_exists": bool(literature_debug.get("literature_path_exists")),
+        "literature_row_count": int(literature_debug.get("literature_row_count") or 0),
+        "verified_row_count": int(literature_debug.get("verified_row_count") or 0),
+        "usable_literature_count": int(
+            literature_debug.get("usable_literature_count") or 0
+        ),
+        "filtered_reason_counts": literature_debug.get("filtered_reason_counts") or {},
+        "transcriptome_result_path": input_debug.get("transcriptome_result_path", ""),
+        "transcriptome_path_exists": bool(input_debug.get("transcriptome_path_exists")),
+        "transcriptome_path_source": input_debug.get("transcriptome_path_source", ""),
+        "metabolome_path": input_debug.get("metabolome_path", ""),
+        "metabolome_path_exists": bool(input_debug.get("metabolome_path_exists")),
+        "metabolome_path_source": input_debug.get("metabolome_path_source", ""),
+        "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
+        "metabolome_preview_row_count": int(
+            input_debug.get("metabolome_preview_row_count") or 0
+        ),
+        "metabolome_preview_truncated": bool(input_debug.get("metabolome_preview_truncated")),
+        "evidence_level": input_debug.get("evidence_level", ""),
+        "smoke_context_primary_gene": smoke_debug.get("primary_gene_id", ""),
+        "smoke_context_gene_count": int(smoke_debug.get("gene_count") or 0),
+        "smoke_context_gene_ids_preview": smoke_debug.get("gene_ids_preview") or [],
+        "background_literature_count": len(background_literature_records),
+        "background_literature_backend": background_literature_search.get("backend", ""),
+        "background_literature_status": background_literature_search.get("status", ""),
+        "background_literature_source": background_literature_search.get(
+            "literature_source", ""
+        ),
+    }
+
+
+# 证据完整性提示，仅检查 Evidence Pack 是否完整
+def _build_warnings(evidence_pack: dict[str, Any]) -> list[str]:
+    """根据 Evidence Pack 内容生成轻量 warning。
+
+    这些 warning 不是 Guard 最终判定，只是提示当前证据是否完整。
+    """
+
+    summary = summarize_evidence_pack(evidence_pack)
+    warnings: list[str] = []
+
+    # 如果 Evidence Pack 里没有提取到 target genes，说明转录组证据没有提供可用候选基因。
+    if not summary["target_genes"]:
+        warnings.append("No target genes were extracted from transcriptome evidence.")
+
+    # 转录组文件不可用时 warning
+    if (
+        summary.get("evidence_level") == "input_missing_or_filename_only"
+        or (
+            summary.get("transcriptome_result_path")
+            and not summary.get("transcriptome_path_exists")
+        )
+    ):
+        warnings.append("当前未读取到可用的转录组差异基因结果。")
+
+    # 没有本地已验证文献时 warning，这里判断的是：literature_record_count，不等于 PubMed 背景文献数
+    if summary["literature_record_count"] == 0 and summary["background_literature_count"] == 0:
+        warnings.append(
+            "当前输入中未提供可用的已验证文献证据记录，因此本次建议不包含 DOI 引用。"
+        )
+
+    return warnings
+
+
+# Evidence Pack 准备入口。
+# 该函数本身不直接解析 TSV，而是调用 evidence_adapters.build_omics_evidence_pack_from_context()
+# 从 Context 中读取 transcriptome_result_path / metabolome_path / literature_evidence_path
+# 并构建基础 Evidence Pack。
+#
+# 基础 Evidence Pack 构建完成后，再调用 search_background_literature()
+# 根据 trait 和已提取的 target_genes 补充 PubMed 背景文献线索。
+#
+# 注意：
+# - 本地 verified literature 与 PubMed background literature 是两类不同证据；
+# - transcriptome_path_exists / metabolome_path_exists 来自 Evidence Pack debug.inputs；
+# - warnings 只是证据完整性提醒，不等于 Guard 最终失败。
+def prepare_omics_evidence_pack_from_context(
+    context: OmicsBreedingAnalysisContext,
+) -> dict[str, Any]:
+
+    """从 Context 中的文件路径构建 Evidence Pack，并写入输出路径。"""
+    # 这一步进入 evidence_adapters.py。它负责从 context 读取，然后生成基础 Evidence Pack
+    evidence_pack = build_omics_evidence_pack_from_context(context)
+    # 调用 PubMed 背景文献检索  PubMed 背景检索是在 Evidence Pack 准备阶段接入的
+    background_literature = search_background_literature(
+        trait=context.trait,
+        # 如果没有目标基因，它仍然可以根据 trait 做背景检索
+        target_genes=evidence_pack.get("targets", {}).get("genes") or [],
+    )
+    # 把 PubMed 结果塞回 Evidence Pack，下游 citation_engine.py 可以读取这些背景文献
+    evidence_pack["background_literature_records"] = background_literature.get("records") or []
+    # 写入检索状态
+    evidence_pack["background_literature_search"] = {
+        "status": background_literature.get("status", ""),
+        "backend": background_literature.get("backend", ""),
+        "literature_source": background_literature.get("literature_source", ""),
+        "queries": background_literature.get("queries") or [],
+        "warning_count": len(background_literature.get("warnings") or []),
+        "warnings": background_literature.get("warnings") or [],
+    }
+    guard_requirements = evidence_pack.setdefault("guard_requirements", {})
+    background_records = background_literature.get("records") or []
+    allowed_dois = list(guard_requirements.get("allowed_dois") or [])
+    allowed_quotes = list(guard_requirements.get("allowed_quoted_sentences") or [])
+    for record in background_records:
+        doi = str(record.get("doi") or "").strip()
+        quoted_sentence = str(record.get("quoted_sentence") or "").strip()
+        if doi and doi not in allowed_dois:
+            allowed_dois.append(doi)
+        if quoted_sentence and quoted_sentence not in allowed_quotes:
+            allowed_quotes.append(quoted_sentence)
+    guard_requirements["allowed_dois"] = allowed_dois
+    guard_requirements["allowed_quoted_sentences"] = allowed_quotes
+    # 写出 omics_evidence_pack.json 到磁盘 总链路是：
+    # chat_service.py 构造 output_dir
+    #   ↓
+    # omics_analysis.py 构造 evidence_pack_output_path
+    #   ↓
+    # workflow.py 写出 omics_evidence_pack.json
+    output_path = write_evidence_pack(evidence_pack, context.evidence_pack_output_path)
+    # 生成 warnings
+    warnings = _build_warnings(evidence_pack) # Evidence Pack 自身完整性 warning
+    warnings.extend(background_literature.get("warnings") or []) # PubMed 背景检索 warning
+
+    # 返回 Evidence Pack 结果，会继续传给总装函数 prepare_cited_guarded_omics_analysis_from_context()
+    return {
+        "status": "completed_with_warnings" if warnings else "completed",
+        "evidence_pack_path": str(output_path),
+        "evidence_pack": evidence_pack,
+        "summary": summarize_evidence_pack(evidence_pack),
+        "warnings": warnings,
+        "artifacts": [str(output_path)],
+    }
+
+
+# 旧工具桥接入口 当前主线：
+# Context 文件路径
+# → build_omics_evidence_pack_from_context()
+#
+# 旧桥接：
+# 旧 Tool 返回结果
+# → build_omics_evidence_pack_from_tool_results()
+def prepare_omics_evidence_pack_from_tool_results(
+    *,
+    context: OmicsBreedingAnalysisContext,
+    transcriptome_tool_result: dict[str, Any] | None = None,
+    literature_tool_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """从旧 Tool 返回结果构建 Evidence Pack，并写入输出路径。
+
+    这是过渡层：
+    - 可以复用旧 breeding_transcriptome_deg 的 significant_de_genes_path；
+    - 可以复用旧 breeding_literature_evidence 的 entries；
+    - 不复用旧 advice_generate 或 smoke 一键建议结果。
+    """
+
+    evidence_pack = build_omics_evidence_pack_from_tool_results(
+        context=context,
+        transcriptome_tool_result=transcriptome_tool_result,
+        literature_tool_result=literature_tool_result,
+    )
+    output_path = write_evidence_pack(evidence_pack, context.evidence_pack_output_path)
+    warnings = _build_warnings(evidence_pack)
+
+    return {
+        "status": "completed_with_warnings" if warnings else "completed",
+        "evidence_pack_path": str(output_path),
+        "evidence_pack": evidence_pack,
+        "summary": summarize_evidence_pack(evidence_pack),
+        "warnings": warnings,
+        "artifacts": [str(output_path)],
+    }
+
+
+# 通用 JSON 写出函数  dict --> json
+def write_json_artifact(payload: dict[str, Any], output_path: str | Path) -> Path:
+    """将结构化结果写入 JSON artifact。
+
+    用于写出 guard_result.json、后续 citation_result.json 等结构化文件。
+    """
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+# 这个函数是 Guard 的 workflow 入口
+def guard_omics_answer(
+    *,
+    answer_markdown: str,
+    evidence_pack: dict[str, Any],
+    guard_result_path: str | Path,
+) -> dict[str, Any]:
+    """对多组学育种分析回答执行 Dynamic Guard，并写出 guard_result.json。
+
+    这个函数只负责：
+    - 调用 Dynamic Guard
+    - 写出 guard_result.json
+    - 返回统一结构
+
+    它不负责：
+    - 生成回答
+    - 调用 LLM
+    - 调用 Citation Engine
+    """
+
+    guard_result = run_dynamic_output_guard(answer_markdown, evidence_pack)
+    guard_path = write_json_artifact(guard_result, guard_result_path)
+
+    return {
+        "status": "passed" if guard_result["passed"] else "failed_guard",  # Guard 是否通过
+        "answer_markdown": answer_markdown,
+        "guard_result": guard_result,
+        "guard_result_path": str(guard_path),
+        "artifacts": [str(guard_path)],
+    }
+
+
+# 把前面几层串起来：
+# Context
+# ↓
+# prepare_omics_evidence_pack_from_context()
+# ↓
+# Evidence Pack
+# ↓
+# guard_omics_answer()
+# ↓
+# guard_result.json
+def prepare_guarded_omics_answer_from_context(
+    *,
+    context: OmicsBreedingAnalysisContext,
+    answer_markdown: str,
+    guard_result_path: str | Path,
+) -> dict[str, Any]:
+    """从 Context 构建 Evidence Pack，然后对 answer_markdown 执行 Guard。
+
+    这是临时衔接函数：
+    - 当前阶段 answer_markdown 由测试或后续 LLM/Citation 层传入；
+    - 本函数负责证据准备和 Guard；
+    - 后续 LlamaIndex 接入后，可把 Citation Engine 生成的回答传入这里。
+    """
+
+    evidence_pack_result = prepare_omics_evidence_pack_from_context(context)
+    guard_result = guard_omics_answer(
+        answer_markdown=answer_markdown,
+        evidence_pack=evidence_pack_result["evidence_pack"],
+        guard_result_path=guard_result_path,
+    )
+
+    return {
+        "status": guard_result["status"],
+        "answer_markdown": answer_markdown,
+        "evidence_pack": evidence_pack_result["evidence_pack"],
+        "evidence_pack_path": evidence_pack_result["evidence_pack_path"],
+        "guard_result": guard_result["guard_result"],
+        "guard_result_path": guard_result["guard_result_path"],
+        "summary": evidence_pack_result["summary"],
+        "warnings": evidence_pack_result["warnings"],
+        "artifacts": [
+            *evidence_pack_result["artifacts"],
+            *guard_result["artifacts"],
+        ],
+    }
+
+
+# 当前新智能体的第一个“统一结果入口”，是后端 workflow 层的可测试总装函数。
+# 它做了：
+# 1. 生成 Evidence Pack
+# 2. 生成 Citation Result
+# 3. 执行 Dynamic Guard
+# 4. 写出 final_result.json
+# 把当前已有模块串了起来：
+# Context
+# ↓
+# prepare_omics_evidence_pack_from_context()
+# ↓
+# build_citation_result()
+# ↓
+# guard_omics_answer()
+# ↓
+# final_result.json
+
+# 函数在当前链路中的位置
+# chat_service.py direct route
+#   ↓
+# omics_breeding_analysis_run.invoke({"input": tool_input})
+#   ↓
+# omics_analysis.py
+#   ↓
+# prepare_cited_guarded_omics_analysis_from_context()
+#   ↓
+# workflow.py 总装
+def prepare_cited_guarded_omics_analysis_from_context(
+    *,
+    context: OmicsBreedingAnalysisContext,
+    use_llamaindex: bool = False,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """构建带 citation、Dynamic Guard 和前端展示 payload 的多组学育种分析结果。
+
+    流程：
+    1. 根据 Context 构建 Evidence Pack；
+    2. 基于 Evidence Pack 构建 citation result；
+    3. 对 answer_markdown 执行 Dynamic Guard；
+    4. 生成 frontend_payload；
+    5. 写出 answer_markdown.md、citation_result.json、guard_result.json、
+       frontend_payload.json、final_result.json；
+    6. 返回前端可消费的统一结构。
+    """
+
+    # 负责把 Context 里的路径和输入变成统一证据包 Evidence Pack
+    evidence_pack_result = prepare_omics_evidence_pack_from_context(context)
+    evidence_pack = evidence_pack_result["evidence_pack"]
+
+    # 确定输出目录  决定所有结果文件写到哪里
+    base_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(context.evidence_pack_output_path).expanduser().resolve().parent
+    )
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 构建 Citation Result，也就是 LLM 分析结果
+    citation_result = build_citation_result(
+        evidence_pack=evidence_pack,
+        question=context.question,
+        use_llamaindex=use_llamaindex,
+        model_name=context.model,
+    )
+
+    answer_markdown = citation_result["answer_markdown"]
+
+    # 确定几个输出文件路径
+    answer_path = base_output_dir / "answer_markdown.md"
+    citation_result_path = base_output_dir / "citation_result.json"
+    guard_result_path = base_output_dir / "guard_result.json"
+    frontend_payload_path = base_output_dir / "frontend_payload.json"
+    final_result_path = base_output_dir / "final_result.json"
+
+    # 写出 Markdown 和 citation_result
+    # 这一步先把 LLM 生成的正文写成 Markdown 文件，再把 citation 结构化结果写成 JSON。
+    # 这里还没有执行 Guard，也还没有生成 frontend_payload。
+    answer_path.write_text(answer_markdown, encoding="utf-8")
+    write_json_artifact(citation_result, citation_result_path)
+
+    # 执行 Guard，对刚才生成的 answer_markdown 做动态边界检查
+    guard_result = guard_omics_answer(
+        answer_markdown=answer_markdown,
+        evidence_pack=evidence_pack,
+        guard_result_path=guard_result_path,
+    )
+
+    # 决定最终状态
+    final_status = "completed" if guard_result["guard_result"]["passed"] else "failed_guard"
+
+    # 合并 artifacts，把所有输出文件路径收集到一个列表，最终前端或诊断里能看到结构化输出文件，就是来自这里
+    artifacts = [
+        *evidence_pack_result["artifacts"],
+        str(answer_path),
+        str(citation_result_path),
+        *guard_result["artifacts"],
+        str(frontend_payload_path),
+        str(final_result_path),
+    ]
+
+    # 把 Evidence Pack 阶段的 summary 和 Citation 阶段的 backend 合并起来
+    summary = {
+        **evidence_pack_result["summary"],
+        "analysis_backend": citation_result["backend"],
+        "citation_backend": citation_result.get("citation_backend", ""),
+        "citation_disabled_reason": citation_result.get("disabled_reason", ""),
+        "llamaindex_available": bool(citation_result.get("llamaindex_available")),
+        "literature_card_count": len(citation_result["literature_cards"]),
+    }
+
+    # 组装 final_result，这是后端最终结果的主结构
+    # 它会返回给：
+    # omics_analysis.py
+    #   ↓
+    # chat_service.py tool_result
+    #   ↓
+    # _save_direct_breeding_workbench_tool_messages()
+    #   ↓
+    # 前端 history
+    final_result = {
+        "status": final_status,
+        "backend": citation_result["backend"],
+        "llamaindex_available": citation_result["llamaindex_available"],
+        "answer_markdown": answer_markdown,
+        "citations": citation_result["citations"],
+        "literature_cards": citation_result["literature_cards"],
+        "claim_trace": citation_result["claim_trace"],
+        "source_nodes": citation_result.get("source_nodes") or [],
+        "guard_result": guard_result["guard_result"],
+        "evidence_pack": evidence_pack,
+        "evidence_pack_path": evidence_pack_result["evidence_pack_path"],
+        "citation_result_path": str(citation_result_path),
+        "guard_result_path": guard_result["guard_result_path"],
+        "answer_markdown_path": str(answer_path),
+        "frontend_payload_path": str(frontend_payload_path),
+        "summary": summary,
+        "warnings": [
+            *evidence_pack_result.get("warnings", []),
+            *citation_result.get("warnings", []),
+            *guard_result["guard_result"].get("warnings", []),
+        ],
+        "artifacts": artifacts,
+    }
+
+    # 生成 frontend_payload，是专门给前端消费的简化结构。
+    frontend_payload = build_frontend_payload(final_result)
+    # final_result 是后端完整结果，字段很多
+    final_result["frontend_payload"] = frontend_payload
+
+    # 写出 frontend_payload 和 final_result
+    write_json_artifact(frontend_payload, frontend_payload_path)
+    write_json_artifact(final_result, final_result_path)
+
+    return final_result

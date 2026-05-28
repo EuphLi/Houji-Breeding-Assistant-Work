@@ -1,0 +1,351 @@
+from __future__ import annotations
+
+import json
+import urllib.parse
+
+import pytest
+
+from yuxi.services.tool_service import get_tool_metadata
+from yuxi.agents.buildin.omics_breeding_analysis.literature_search import (
+    build_literature_queries,
+    search_background_literature,
+)
+from yuxi.agents.buildin.omics_breeding_analysis import workflow as omics_workflow
+from yuxi.agents.toolkits.breeding.omics_analysis import (
+    _run_omics_breeding_analysis_impl,
+    omics_breeding_analysis_run,
+)
+from yuxi.agents.toolkits.buildin.pubmed import pubmed_search
+
+
+# 测试不通过 Tool Registry，而是直接测 _run_omics_breeding_analysis_impl()。这样能稳定验证：
+# TSV 输入
+# → 新 workflow
+# → final_result.json
+def test_omics_breeding_analysis_tool_impl_writes_final_result(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    deg_path = tmp_path / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "GeneA\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+
+    literature_path = tmp_path / "verified_literature_evidence.tsv"
+    literature_path.write_text(
+        "evidence_id\tdoi\tquoted_sentence\tstatus\tis_demo\tsource\ttitle\trelevance_level\n"
+        "L1\t10.1234/real\tVerified sentence.\tverified\tfalse\tPubMed\tVerified Paper\tbackground\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "omics_run"
+
+    result = _run_omics_breeding_analysis_impl(
+        trait="抗旱",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path="",
+        literature_evidence_path=str(literature_path),
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["status"] == "completed"
+    assert result["backend"] == "rule_fallback"
+    assert result["guard_result"]["passed"] is True
+    assert result["summary"]["target_genes"] == ["GeneA"]
+
+    assert "GeneA" in result["answer_markdown"]
+    assert "抗旱" in result["answer_markdown"]
+    assert "10.1234/real" not in result["answer_markdown"]
+    assert "Verified sentence." not in result["answer_markdown"]
+    assert result["summary"]["literature_path_exists"] is True
+    assert result["summary"]["usable_literature_count"] == 1
+
+    assert (output_dir / "omics_evidence_pack.json").exists()
+    assert (output_dir / "answer_markdown.md").exists()
+    assert (output_dir / "citation_result.json").exists()
+    assert (output_dir / "guard_result.json").exists()
+    assert (output_dir / "final_result.json").exists()
+
+    loaded = json.loads((output_dir / "final_result.json").read_text(encoding="utf-8"))
+    assert loaded["status"] == "completed"
+    assert loaded["summary"]["target_genes"] == ["GeneA"]
+
+    assert result["frontend_payload"]["schema_version"] == "omics_frontend_payload.v1"
+    assert result["frontend_payload"]["guard_panel"]["passed"] is True
+    assert result["frontend_payload"]["literature_panel"]["card_count"] == 1
+    assert result["frontend_payload_path"]
+    assert (output_dir / "frontend_payload.json").exists()
+
+
+# 测试验证 breeding/__init__.py 已经导入新模块，使 @tool 注册逻辑生效
+def test_omics_breeding_analysis_tool_is_imported_by_breeding_package():
+    from yuxi.agents.toolkits import breeding  # noqa: F401
+    from yuxi.agents.toolkits.registry import get_all_tool_instances
+
+    tools = get_all_tool_instances()
+    tool_names = {getattr(item, "name", "") for item in tools}
+
+    assert "omics_breeding_analysis_run" in tool_names
+
+
+def test_pubmed_search_is_registered_in_tool_registry():
+    from yuxi.agents.toolkits import buildin  # noqa: F401
+    from yuxi.agents.toolkits.registry import get_all_tool_instances
+
+    tools = get_all_tool_instances()
+    tool_names = {getattr(item, "name", "") for item in tools}
+
+    assert "pubmed_search" in tool_names
+
+
+def test_pubmed_search_is_exposed_in_tool_metadata():
+    tools = get_tool_metadata()
+    pubmed_tool = next(item for item in tools if item["id"] == "pubmed_search")
+
+    assert pubmed_tool["name"] == "PubMed 搜索"
+    assert pubmed_tool["category"] == "buildin"
+    assert "搜索" in pubmed_tool["tags"]
+
+
+def test_omics_breeding_analysis_tool_invoke_accepts_input_wrapper(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_impl(**kwargs):
+        captured.update(kwargs)
+        return {"status": "completed", "summary": {"ok": True}, "artifacts": []}
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.omics_analysis._run_omics_breeding_analysis_impl",
+        fake_impl,
+    )
+
+    payload = {
+        "trait": "黄酮相关",
+        "question": "给出一些育种建议",
+        "transcriptome_result_path": "",
+        "metabolome_path": "",
+        "literature_evidence_path": "",
+        "evidence_pack_output_path": "",
+        "output_dir": "/tmp/yuxi_runs/omics_breeding_analysis_debug",
+        "use_llamaindex": False,
+        "model": "",
+    }
+
+    result = omics_breeding_analysis_run.invoke({"input": payload})
+
+    assert result["status"] == "completed"
+    assert captured["trait"] == "黄酮相关"
+    assert captured["question"] == "给出一些育种建议"
+
+
+def test_omics_breeding_analysis_tool_invoke_without_input_wrapper_raises_validation_error():
+    with pytest.raises(Exception, match="input"):
+        omics_breeding_analysis_run.invoke({"trait": "黄酮相关", "question": "给出一些育种建议"})
+
+
+def test_pubmed_search_parses_pubmed_xml_without_xmltodict(monkeypatch):
+    esearch_payload = json.dumps(
+        {"esearchresult": {"idlist": ["11111111"]}},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    efetch_payload = """\
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>11111111</PMID>
+      <Article>
+        <ArticleTitle>Foxtail millet flavonoid regulation</ArticleTitle>
+        <Abstract>
+          <AbstractText>Flavonoid accumulation changed in millet leaves.</AbstractText>
+        </Abstract>
+        <ELocationID EIdType="doi">10.1000/example</ELocationID>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="doi">10.1000/example</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+""".encode("utf-8")
+
+    class FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 10
+        url = request.full_url
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        if parsed.path.endswith("esearch.fcgi"):
+            assert params["retmax"] == ["2"]
+            return FakeResponse(esearch_payload)
+        if parsed.path.endswith("efetch.fcgi"):
+            assert params["id"] == ["11111111"]
+            return FakeResponse(efetch_payload)
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    result = pubmed_search.invoke({"query": "Setaria italica flavonoid", "max_results": 2})
+
+    assert result["status"] == "completed"
+    assert result["records"][0]["title"] == "Foxtail millet flavonoid regulation"
+    assert result["records"][0]["doi"] == "10.1000/example"
+    assert result["records"][0]["pmid"] == "11111111"
+    assert result["records"][0]["abstract"] == "Flavonoid accumulation changed in millet leaves."
+    assert result["records"][0]["url"] == "https://pubmed.ncbi.nlm.nih.gov/11111111/"
+
+
+def test_search_background_literature_returns_unavailable_when_pubmed_fails(monkeypatch):
+    class FakePubMedTool:
+        @staticmethod
+        def invoke(payload):
+            raise TimeoutError(f"request timeout for {payload['query']}")
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.buildin.pubmed.pubmed_search",
+        FakePubMedTool(),
+    )
+
+    result = search_background_literature(
+        trait="黄酮相关",
+        target_genes=["GeneA", "GeneB", "GeneC"],
+        max_results=9,
+    )
+
+    assert result["status"] == "dynamic_search_unavailable"
+    assert result["literature_source"] == "dynamic_search_unavailable"
+    assert result["backend"] == "pubmed_search"
+    assert result["records"] == []
+    assert len(result["queries"]) == 3
+    assert "PubMed query failed" in result["warnings"][0]
+
+
+def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_path):
+    deg_path = tmp_path / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "GeneA\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "omics_run"
+
+    result = _run_omics_breeding_analysis_impl(
+        trait="抗旱",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path="",
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["status"] == "completed"
+    assert result["summary"]["literature_path_exists"] is False
+    assert result["summary"]["usable_literature_count"] == 0
+    assert "不包含 DOI 引用" in result["answer_markdown"]
+
+
+def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(
+    monkeypatch, tmp_path
+):
+    deg_path = tmp_path / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "GeneA\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "omics_run"
+
+    def fake_background_search(**kwargs):
+        assert kwargs["trait"] == "黄酮"
+        assert kwargs["target_genes"] == ["GeneA"]
+        return {
+            "status": "completed",
+            "backend": "pubmed_search",
+            "literature_source": "pubmed_search",
+            "queries": ["Setaria italica 黄酮", "GeneA Setaria italica"],
+            "records": [
+                {
+                    "query": "Setaria italica 黄酮",
+                    "title": "Flavonoid pathway in foxtail millet",
+                    "doi": "10.1000/example",
+                    "pmid": "123456",
+                    "abstract": "Flavonoid accumulation changed in millet leaves.",
+                    "quoted_sentence": "Flavonoid accumulation changed in millet leaves.",
+                    "quote_scope": "abstract",
+                    "url": "https://pubmed.ncbi.nlm.nih.gov/123456/",
+                    "source": "PubMed",
+                }
+            ],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(omics_workflow, "search_background_literature", fake_background_search)
+
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path="",
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["status"] == "completed"
+    assert result["summary"]["background_literature_count"] == 1
+    assert result["summary"]["background_literature_backend"] == "pubmed_search"
+    assert result["summary"]["background_literature_status"] == "completed"
+    assert result["summary"]["background_literature_source"] == "pubmed_search"
+    assert result["literature_cards"][0]["doi"] == "10.1000/example"
+    assert result["literature_cards"][0]["quote_scope"] == "abstract"
+
+    evidence_pack = json.loads((output_dir / "omics_evidence_pack.json").read_text(encoding="utf-8"))
+    assert evidence_pack["background_literature_records"][0]["doi"] == "10.1000/example"
+    assert (
+        evidence_pack["background_literature_records"][0]["quoted_sentence"]
+        == "Flavonoid accumulation changed in millet leaves."
+    )
+
+
+def test_build_literature_queries_adds_trait_specific_pubmed_terms():
+    flavonoid_queries = build_literature_queries("黄酮相关", ["GeneA"])
+    drought_queries = build_literature_queries("抗旱相关", ["GeneA"])
+    yield_queries = build_literature_queries("高产相关", ["GeneA"])
+
+    assert any("flavonoid" in item.lower() for item in flavonoid_queries)
+    assert any("drought" in item.lower() or "abiotic stress" in item.lower() for item in drought_queries)
+    assert any("yield" in item.lower() for item in yield_queries)
