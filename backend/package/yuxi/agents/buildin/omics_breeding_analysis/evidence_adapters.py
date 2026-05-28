@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -87,14 +88,59 @@ def _read_tsv(path: str | Path) -> list[dict[str, str]]:
         return [dict(row) for row in reader]
 
 
+def _normalized_row_lookup(row: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in (row or {}).items():
+        key_text = str(key or "").strip()
+        if not key_text:
+            continue
+        normalized.setdefault(key_text.lower(), value)
+    return normalized
+
+
 # 从一组候选字段名里，取第一个存在且非空的值
 # 因为不同工具或不同 TSV 的列名可能不统一，增强兼容性，避免代码只认一种固定列名
 # 如 _first_present(row, ["gene_id", "GeneID", "gene"]) 会返回对应的基因ID
 def _first_present(row: dict[str, Any], candidates: list[str]) -> str:
+    normalized_row = _normalized_row_lookup(row)
     for key in candidates:
         value = row.get(key)
+        if value is None:
+            value = normalized_row.get(str(key or "").strip().lower())
         if value is not None and str(value).strip():
             return str(value).strip()
+    return ""
+
+
+def _infer_gene_id(row: dict[str, Any]) -> str:
+    gene_id = _first_present(
+        row,
+        [
+            "gene_id",
+            "geneid",
+            "gene_id(s)",
+            "gene",
+            "gene_name",
+            "target_gene",
+            "feature_id",
+            "locus_id",
+            "locus",
+            "id",
+        ],
+    )
+    if gene_id:
+        return gene_id
+
+    normalized_row = _normalized_row_lookup(row)
+    for key, value in normalized_row.items():
+        if ("gene" in key or key.endswith("_id") or key == "id") and str(value or "").strip():
+            return str(value).strip()
+
+    for value in (row or {}).values():
+        text = str(value or "").strip()
+        if text:
+            return text
+
     return ""
 
 
@@ -122,6 +168,52 @@ def _context_data_dir(context: OmicsBreedingAnalysisContext) -> str:
             return str(path.parent)
         return str(path)
     return ""
+
+
+def _candidate_context_roots(context: OmicsBreedingAnalysisContext) -> list[Path]:
+    roots: list[Path] = []
+    for raw in [
+        context.upload_root,
+        _context_data_dir(context),
+    ]:
+        normalized = str(raw or "").strip()
+        if not normalized:
+            continue
+        path = Path(normalized).expanduser()
+        candidate_root = path if path.is_dir() else path.parent
+        if candidate_root in roots:
+            continue
+        roots.append(candidate_root)
+    return roots
+
+
+def _resolve_context_file_path(
+    path_value: str | Path,
+    *,
+    context: OmicsBreedingAnalysisContext,
+) -> str:
+    normalized = str(path_value or "").strip()
+    if not normalized:
+        return ""
+
+    explicit = Path(normalized).expanduser()
+    candidates = [explicit]
+    for root in _candidate_context_roots(context):
+        candidates.append(root / normalized)
+        candidates.append(root / explicit.name)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        if candidate_text in seen:
+            continue
+        seen.add(candidate_text)
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    if explicit.is_absolute():
+        return str(explicit)
+    return normalized
 
 
 def _read_smoke_gene_ids(path: str | Path) -> list[str]:
@@ -186,8 +278,14 @@ def _read_text_preview(
 # 输入路径诊断
 def collect_input_file_diagnostics(context: OmicsBreedingAnalysisContext) -> dict[str, Any]:
     # 读取：
-    transcriptome_path = str(context.transcriptome_result_path or "").strip()
-    metabolome_path = str(context.metabolome_path or "").strip()
+    transcriptome_path = _resolve_context_file_path(
+        context.transcriptome_result_path,
+        context=context,
+    )
+    metabolome_path = _resolve_context_file_path(
+        context.metabolome_path,
+        context=context,
+    )
     # 判断：
     transcriptome_exists = bool(transcriptome_path) and Path(transcriptome_path).is_file()
     metabolome_exists = bool(metabolome_path) and Path(metabolome_path).is_file()
@@ -233,7 +331,7 @@ def read_transcriptome_records(path: str | Path) -> list[dict[str, Any]]:
     # 这里会从每行提取 gene_id。如果某行没有基因 ID，就跳过。
     # 然后构建标准记录
     for index, row in enumerate(rows, start=1):
-        gene_id = _first_present(row, ["gene_id", "GeneID", "gene", "target_gene", "id"])
+        gene_id = _infer_gene_id(row)
         if not gene_id:
             continue
 
@@ -247,14 +345,18 @@ def read_transcriptome_records(path: str | Path) -> list[dict[str, Any]]:
         for source_key, target_key in [
             ("logFC", "logfc"),
             ("log2FoldChange", "logfc"),
+            ("log2fc", "logfc"),
+            ("fold_change", "logfc"),
             ("pvalue", "pvalue"),
             ("p_value", "pvalue"),
+            ("p.value", "pvalue"),
             ("padj", "padj"),
             ("adj.P.Val", "padj"),
+            ("adj_p_val", "padj"),
             ("FDR", "padj"),
         ]:
-            value = row.get(source_key)
-            if value is not None and str(value).strip():
+            value = _first_present(row, [source_key])
+            if value:
                 record[target_key] = str(value).strip()
 
         records.append(record)
@@ -422,16 +524,35 @@ def build_omics_evidence_pack_from_context(
 ) -> dict[str, Any]:
     """根据 Context 中的路径读取证据，并构建 Evidence Pack。"""
 
+    transcriptome_path = _resolve_context_file_path(
+        context.transcriptome_result_path,
+        context=context,
+    )
+    literature_path = _resolve_context_file_path(
+        context.literature_evidence_path,
+        context=context,
+    )
+    metabolome_path = _resolve_context_file_path(
+        context.metabolome_path,
+        context=context,
+    )
+
     # 从 Context 读取转录组文件路径
-    transcriptome_records = read_transcriptome_records(context.transcriptome_result_path)
+    transcriptome_records = read_transcriptome_records(transcriptome_path)
     # 从 Context 读取文献证据文件路径
     literature_diagnostics = collect_literature_evidence_diagnostics(
-        context.literature_evidence_path,
+        literature_path,
         trait=context.trait,
     )
     literature_records = literature_diagnostics["records"]
     # 收集输入路径诊断
-    input_diagnostics = collect_input_file_diagnostics(context)
+    normalized_context = replace(
+        context,
+        transcriptome_result_path=transcriptome_path,
+        metabolome_path=metabolome_path,
+        literature_evidence_path=literature_path,
+    )
+    input_diagnostics = collect_input_file_diagnostics(normalized_context)
     smoke_gene_ids_path = Path(input_diagnostics["data_dir"]) / "smoke_gene_ids.txt"
     smoke_gene_ids = _read_smoke_gene_ids(smoke_gene_ids_path)
     # 代谢组目前只做“文件存在性摘要”

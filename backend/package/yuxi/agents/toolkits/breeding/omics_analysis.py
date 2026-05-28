@@ -115,17 +115,17 @@ def _run_omics_breeding_analysis_impl(
     question: str,
     transcriptome_result_path: str,
     metabolome_path: str,
-    reference_genome_path: str,
-    genome_gff_path: str,
-    annotation_path: str,
-    sample_map_path: str,
-    rnaseq_read_paths: list[str],
-    upload_root: str,
-    uploaded_file_count: int,
-    literature_evidence_path: str,
-    evidence_pack_output_path: str,
-    output_dir: str,
-    use_llamaindex: bool,
+    reference_genome_path: str = "",
+    genome_gff_path: str = "",
+    annotation_path: str = "",
+    sample_map_path: str = "",
+    rnaseq_read_paths: list[str] | None = None,
+    upload_root: str = "",
+    uploaded_file_count: int = 0,
+    literature_evidence_path: str = "",
+    evidence_pack_output_path: str = "",
+    output_dir: str = "",
+    use_llamaindex: bool = False,
     model: str = "",
 ) -> dict[str, Any]:
     """执行新多组学育种分析 workflow。
@@ -150,6 +150,8 @@ def _run_omics_breeding_analysis_impl(
         if evidence_pack_output_path
         else out_path / "omics_evidence_pack.json"
     )
+
+    rnaseq_read_paths = list(rnaseq_read_paths or [])
 
     transcriptome_pipeline_status = "not_enough_inputs"
     transcriptome_pipeline_details: dict[str, Any] = {}

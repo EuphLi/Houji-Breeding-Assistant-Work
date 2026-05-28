@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,20 @@ class CitationSource:
 
 def _as_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _format_citation_suffix(citation_ids: list[str]) -> str:
+    normalized = [str(item).strip() for item in citation_ids if str(item).strip()]
+    if not normalized:
+        return ""
+    return " " + " ".join(f"[{citation_id}]" for citation_id in normalized)
+
+
+def _citation_ids_by_type(sources: list["CitationSource"]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for source in sources:
+        grouped.setdefault(source.source_type, []).append(source.citation_id)
+    return grouped
 
 
 def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource]:
@@ -201,6 +216,8 @@ def build_literature_cards(sources: list[CitationSource]) -> list[dict[str, Any]
                 "pmid": source.metadata.get("pmid", ""),
                 "quoted_sentence": source.metadata.get("quoted_sentence", ""),
                 "abstract_sentence": source.metadata.get("quoted_sentence", ""),
+                "quote_scope": source.metadata.get("quote_scope", "")
+                or ("abstract" if source.source_type == "background_literature" else ""),
                 "title": source.metadata.get("title", ""),
                 "relevance_level": source.metadata.get("relevance_level", ""),
                 "source": source.metadata.get("source", "") or source.source_type,
@@ -300,11 +317,19 @@ def _build_structured_analysis_sections(
     *,
     evidence_pack: dict[str, Any],
     literature_cards: list[dict[str, Any]],
+    sources: list[CitationSource],
 ) -> str:
     task = evidence_pack.get("task") or {}
     targets = evidence_pack.get("targets") or {}
+    evidence = evidence_pack.get("evidence") or {}
     debug_inputs = ((evidence_pack.get("debug") or {}).get("inputs") or {})
     background_records = evidence_pack.get("background_literature_records") or []
+    citation_ids = _citation_ids_by_type(sources)
+    transcriptome_citations = citation_ids.get("transcriptome") or []
+    literature_citations = citation_ids.get("literature") or []
+    metabolome_citations = citation_ids.get("metabolome_context") or []
+    genome_citations = citation_ids.get("genome_context") or []
+    background_citations = citation_ids.get("background_literature") or []
 
     trait = _as_str(task.get("trait"))
     question = _as_str(task.get("question"))
@@ -314,6 +339,7 @@ def _build_structured_analysis_sections(
     metabolome_exists = bool(debug_inputs.get("metabolome_path_exists"))
     data_source = _as_str(debug_inputs.get("data_source") or debug_inputs.get("evidence_level"))
     evidence_level = _as_str(debug_inputs.get("evidence_level"))
+    verified_literature_records = evidence.get("literature") or []
 
     input_lines = [
         "## 当前输入与证据状态",
@@ -329,6 +355,7 @@ def _build_structured_analysis_sections(
     if transcriptome_exists and target_genes:
         candidate_lines.append(
             f"- 当前已从转录组差异结果中提取候选基因：{', '.join(target_genes)}。"
+            f"{_format_citation_suffix(transcriptome_citations[:2])}"
         )
     elif _is_flavonoid_trait(trait) and smoke_primary_gene:
         candidate_lines.append(
@@ -337,26 +364,30 @@ def _build_structured_analysis_sections(
     else:
         candidate_lines.append(
             "- 当前未读取到可确认候选基因的真实转录组差异结果，因此本轮建议以代谢组文件存在性和 PubMed 背景线索为主。"
+            f"{_format_citation_suffix((metabolome_citations + background_citations + literature_citations)[:3])}"
         )
 
     if evidence_level == "default_smoke_data":
         candidate_lines.append(
             "- 当前演示使用默认 smoke 数据目录，适合说明分析链路，不等同于用户已上传并跑通完整多组学正式数据。"
+            f"{_format_citation_suffix(genome_citations[:1])}"
         )
 
     literature_lines = ["## 文献依据"]
+    if not verified_literature_records:
+        literature_lines.append("- 当前输入中未提供可用的已验证文献证据记录，因此本次建议不包含 DOI 引用。")
+        if background_records:
+            literature_lines.append(
+                f"- 当前仅补充 PubMed 背景文献线索，请结合对应 citation id 查看结构化卡片，不应将其视为当前实验的直接验证证据。{_format_citation_suffix(background_citations[:2])}"
+            )
     if literature_cards:
         for card in literature_cards[:3]:
-            identifier = _as_str(card.get("doi")) or _as_str(card.get("pmid")) or "未检索到可用文献标识"
-            identifier_label = "DOI" if _as_str(card.get("doi")) else ("PMID" if _as_str(card.get("pmid")) else "标识")
-            quote = _as_str(card.get("quoted_sentence") or card.get("abstract_sentence"))
+            citation_id = _as_str(card.get("citation_id"))
+            citation_suffix = _format_citation_suffix([citation_id] if citation_id else [])
             literature_lines.extend(
                 [
-                    f"### {card.get('citation_id') or '文献'}",
-                    f"- title: {_as_str(card.get('title')) or 'N/A'}",
-                    f"- {identifier_label}: {identifier}",
-                    f"- source: {_as_str(card.get('source')) or 'N/A'}",
-                    f"- 引用原文: {quote or '未检索到可展示摘要句'}",
+                    f"### {card.get('citation_id') or '文献'}{citation_suffix}",
+                    f"- 已纳入一条结构化文献证据，请查看文献卡片中的 DOI、标题与原文摘录。{citation_suffix}",
                 ]
             )
     else:
@@ -367,27 +398,43 @@ def _build_structured_analysis_sections(
         if transcriptome_exists and target_genes:
             advice_lines.append(
                 f"- 可优先围绕 {target_genes[0]} 及其邻近通路基因，结合黄酮含量分层材料开展候选位点筛选。"
+                f"{_format_citation_suffix(transcriptome_citations[:1])}"
             )
         elif smoke_primary_gene:
             advice_lines.append(
                 f"- 在黄酮相关演示场景下，可将 {smoke_primary_gene} 作为待验证候选基因线索，先在不同群体材料中检查其基因型与黄酮表型分化是否一致。"
+                f"{_format_citation_suffix(genome_citations[:1])}"
             )
         advice_lines.append(
             "- 结合代谢组文件中黄酮相关化合物丰度分层结果，优先筛选与黄酮积累方向一致的材料进入后续验证。"
+            f"{_format_citation_suffix(metabolome_citations[:1])}"
         )
     else:
-        advice_lines.append("- 建议优先围绕当前性状相关的候选基因、代谢表型和背景文献线索制定验证顺序。")
+        advice_lines.append(
+            "- 建议优先围绕当前性状相关的候选基因、代谢表型和背景文献线索制定验证顺序。"
+            f"{_format_citation_suffix((transcriptome_citations + metabolome_citations + background_citations)[:3])}"
+        )
 
     validation_lines = [
         "## 后续群体验证建议",
-        "- 建议在群体层面结合目标性状表型、候选基因基因型和必要的表达检测开展关联验证，先做群体验证，再决定是否进入湿实验或标记开发。",
+        (
+            "- 建议在群体层面结合目标性状表型、候选基因基因型和必要的表达检测开展关联验证，"
+            "先做群体验证，再决定是否进入湿实验或标记开发。"
+            f"{_format_citation_suffix((transcriptome_citations or genome_citations)[:2])}"
+        ),
     ]
 
     boundary_lines = ["## 边界说明"]
     if not transcriptome_exists:
-        boundary_lines.append("- 当前未读取到真实 DEG 文件，因此不能宣称已完成候选基因的转录组证据确认。")
-    boundary_lines.append("- PubMed 文献在本轮中仅作为背景文献线索，不等同于已经直接验证当前候选基因。")
-    boundary_lines.append("- 本轮输出不代表已完成群体验证、湿实验验证或最终 KASP/CAPS 标记开发。")
+        boundary_lines.append(
+            "- 当前未读取到真实 DEG 文件，因此不能将候选基因表述为已被转录组证据确认。"
+            f"{_format_citation_suffix(genome_citations[:1])}"
+        )
+    boundary_lines.append(
+        "- PubMed 文献在本轮中仅作为背景文献线索，不等同于已经直接验证当前候选基因。"
+        f"{_format_citation_suffix(background_citations[:2])}"
+    )
+    boundary_lines.append("- 本轮输出仅为前期证据整理，后续仍需群体验证、湿实验验证与 KASP/CAPS 标记开发评估。")
 
     return "\n".join(
         [
@@ -530,16 +577,19 @@ def build_mock_cited_answer(
     - Guard 前置验证。
     """
 
-    del sources
     return "\n".join(
         [
             "# 多组学育种分析结果",
             "",
-            "当前未命中可用的在线 LLM 分析，因此以下内容基于现有 Evidence Pack 做规则化汇总。",
+            (
+                "当前未命中可用的在线 LLM 分析，因此以下内容基于现有 Evidence Pack 做规则化汇总。"
+                f"{_format_citation_suffix([source.citation_id for source in sources[:3]])}"
+            ),
             "",
             _build_structured_analysis_sections(
                 evidence_pack=evidence_pack,
                 literature_cards=build_literature_cards(build_citation_sources(evidence_pack)),
+                sources=sources,
             ),
         ]
     )
@@ -613,6 +663,17 @@ def _split_answer_into_claim_segments(answer_markdown: str) -> list[str]:
 
     return segments
 
+
+def _extract_citation_ids_from_segment(segment: str, valid_source_ids: list[str]) -> list[str]:
+    valid = set(valid_source_ids)
+    found: list[str] = []
+    for match in re.findall(r"\[([^\[\]]+)\]", segment):
+        for token in re.split(r"[\s,]+", match.strip()):
+            citation_id = token.strip()
+            if citation_id and citation_id in valid and citation_id not in found:
+                found.append(citation_id)
+    return found
+
 # 修改 build_claim_trace() 的拆句逻辑：
 # 修改前：GeneA 是候选基因。[T1]
 # 被拆成：["GeneA 是候选基因", "[T1]"]
@@ -636,7 +697,7 @@ def build_claim_trace(
 
     trace: list[dict[str, Any]] = []
     for index, segment in enumerate(raw_segments, start=1):
-        cited_ids = [source_id for source_id in source_ids if f"[{source_id}]" in segment]
+        cited_ids = _extract_citation_ids_from_segment(segment, source_ids)
         trace.append(
             {
                 "claim_id": f"C{index}",
@@ -779,6 +840,7 @@ def build_citation_result(
             _build_structured_analysis_sections(
                 evidence_pack=evidence_pack,
                 literature_cards=literature_cards,
+                sources=sources,
             ),
         ]
     ).strip()
