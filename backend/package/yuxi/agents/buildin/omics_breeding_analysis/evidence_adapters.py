@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import logging
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +154,9 @@ def _infer_input_source(path: str | Path) -> str:
 
 
 def _context_data_dir(context: OmicsBreedingAnalysisContext) -> str:
+    upload_root = str(context.upload_root or "").strip()
+    if upload_root:
+        return upload_root
     for value in [
         context.transcriptome_result_path,
         context.metabolome_path,
@@ -214,6 +216,76 @@ def _resolve_context_file_path(
     if explicit.is_absolute():
         return str(explicit)
     return normalized
+
+
+def _list_upload_root_files(context: OmicsBreedingAnalysisContext) -> list[Path]:
+    upload_root = str(context.upload_root or "").strip()
+    if not upload_root:
+        return []
+    root_path = Path(upload_root).expanduser()
+    if not root_path.exists() or not root_path.is_dir():
+        return []
+    return [path for path in root_path.rglob("*") if path.is_file()]
+
+
+def _discover_context_input_paths(context: OmicsBreedingAnalysisContext) -> dict[str, Any]:
+    upload_files = _list_upload_root_files(context)
+    discovered: dict[str, Any] = {
+        "transcriptome_result_path": "",
+        "metabolome_path": "",
+        "literature_evidence_path": "",
+        "sample_map_path": "",
+        "reference_genome_path": "",
+        "genome_gff_path": "",
+        "annotation_path": "",
+        "rnaseq_read_paths": [],
+    }
+    if not upload_files:
+        return discovered
+
+    def _pick_first(predicate) -> str:
+        for path in upload_files:
+            if predicate(path):
+                return str(path.resolve())
+        return ""
+
+    discovered["transcriptome_result_path"] = _pick_first(
+        lambda path: path.name == "significant_de_genes.tsv"
+        and "transcriptome_deg" in {part.lower() for part in path.parts}
+    )
+    discovered["metabolome_path"] = _pick_first(
+        lambda path: path.name == "metabolome_raw_3372.tsv"
+        or ("metabolome" in path.name.lower() and path.suffix.lower() == ".tsv")
+    )
+    discovered["literature_evidence_path"] = _pick_first(
+        lambda path: path.name == "verified_literature_evidence.tsv"
+    )
+    discovered["sample_map_path"] = _pick_first(
+        lambda path: path.name == "sampleName_clientId.txt"
+    )
+    discovered["reference_genome_path"] = _pick_first(
+        lambda path: path.name in {"genome.fa", "genome.fasta"}
+    )
+    discovered["genome_gff_path"] = _pick_first(
+        lambda path: path.name in {"genome.gff", "genome.gff3"}
+    )
+    discovered["annotation_path"] = _pick_first(
+        lambda path: (
+            "annotation" in path.name.lower()
+            or path.name in {"smoke_gene_ids.txt", "xiaomi_T2T_Annotation.smoke_genes.txt"}
+        )
+        and path.suffix.lower() in {".txt", ".tsv"}
+    )
+    discovered["rnaseq_read_paths"] = [
+        str(path.resolve())
+        for path in upload_files
+        if path.name.lower().endswith((".fq", ".fastq", ".fq.gz", ".fastq.gz"))
+    ]
+    return discovered
+
+
+def discover_context_input_paths(context: OmicsBreedingAnalysisContext) -> dict[str, Any]:
+    return _discover_context_input_paths(context)
 
 
 def _read_smoke_gene_ids(path: str | Path) -> list[str]:
@@ -277,23 +349,87 @@ def _read_text_preview(
 
 # 输入路径诊断
 def collect_input_file_diagnostics(context: OmicsBreedingAnalysisContext) -> dict[str, Any]:
+    discovered_paths = discover_context_input_paths(context)
     # 读取：
     transcriptome_path = _resolve_context_file_path(
-        context.transcriptome_result_path,
+        context.transcriptome_result_path or discovered_paths["transcriptome_result_path"],
         context=context,
     )
     metabolome_path = _resolve_context_file_path(
-        context.metabolome_path,
+        context.metabolome_path or discovered_paths["metabolome_path"],
         context=context,
     )
+    literature_path = _resolve_context_file_path(
+        context.literature_evidence_path or discovered_paths["literature_evidence_path"],
+        context=context,
+    )
+    sample_map_path = _resolve_context_file_path(
+        context.sample_map_path or discovered_paths["sample_map_path"],
+        context=context,
+    )
+    reference_genome_path = _resolve_context_file_path(
+        context.reference_genome_path or discovered_paths["reference_genome_path"],
+        context=context,
+    )
+    genome_gff_path = _resolve_context_file_path(
+        context.genome_gff_path or discovered_paths["genome_gff_path"],
+        context=context,
+    )
+    annotation_path = _resolve_context_file_path(
+        context.annotation_path or discovered_paths["annotation_path"],
+        context=context,
+    )
+    rnaseq_read_paths = [
+        _resolve_context_file_path(path, context=context)
+        for path in ((context.rnaseq_read_paths or []) or discovered_paths["rnaseq_read_paths"])
+        if str(path or "").strip()
+    ]
     # 判断：
     transcriptome_exists = bool(transcriptome_path) and Path(transcriptome_path).is_file()
     metabolome_exists = bool(metabolome_path) and Path(metabolome_path).is_file()
+    literature_exists = bool(literature_path) and Path(literature_path).is_file()
+    sample_map_exists = bool(sample_map_path) and Path(sample_map_path).is_file()
+    reference_genome_exists = bool(reference_genome_path) and Path(reference_genome_path).is_file()
+    genome_gff_exists = bool(genome_gff_path) and Path(genome_gff_path).is_file()
+    annotation_exists = bool(annotation_path) and Path(annotation_path).is_file()
+    existing_rnaseq_read_paths = [path for path in rnaseq_read_paths if Path(path).is_file()]
+    transcriptome_supporting_input_count = len(existing_rnaseq_read_paths) + sum(
+        [
+            sample_map_exists,
+            reference_genome_exists,
+            genome_gff_exists,
+            annotation_exists,
+        ]
+    )
+    transcriptome_supporting_input_exists = transcriptome_supporting_input_count > 0
+    if transcriptome_exists:
+        transcriptome_input_status = "deg_available"
+    elif existing_rnaseq_read_paths:
+        transcriptome_input_status = "fastq_uploaded"
+    elif transcriptome_supporting_input_exists:
+        transcriptome_input_status = "supporting_files_uploaded"
+    else:
+        transcriptome_input_status = "missing"
 
-    if transcriptome_exists or metabolome_exists:
-        if _infer_input_source(transcriptome_path) == "default_smoke_data" or _infer_input_source(
-            metabolome_path
-        ) == "default_smoke_data":
+    effective_paths = [
+        transcriptome_path,
+        metabolome_path,
+        literature_path,
+        sample_map_path,
+        reference_genome_path,
+        genome_gff_path,
+        annotation_path,
+        *existing_rnaseq_read_paths,
+    ]
+    any_existing_inputs = (
+        transcriptome_exists
+        or metabolome_exists
+        or literature_exists
+        or transcriptome_supporting_input_exists
+    )
+
+    if any_existing_inputs:
+        if any(_infer_input_source(path) == "default_smoke_data" for path in effective_paths):
             evidence_level = "default_smoke_data"
         else:
             evidence_level = "user_provided_path"
@@ -307,9 +443,33 @@ def collect_input_file_diagnostics(context: OmicsBreedingAnalysisContext) -> dic
         "transcriptome_result_path": transcriptome_path,
         "transcriptome_path_exists": transcriptome_exists,
         "transcriptome_path_source": _infer_input_source(transcriptome_path),
+        "transcriptome_input_status": transcriptome_input_status,
+        "transcriptome_supporting_input_exists": transcriptome_supporting_input_exists,
+        "transcriptome_supporting_input_count": transcriptome_supporting_input_count,
         "metabolome_path": metabolome_path,
         "metabolome_path_exists": metabolome_exists,
         "metabolome_path_source": _infer_input_source(metabolome_path),
+        "literature_evidence_path": literature_path,
+        "literature_path_exists": literature_exists,
+        "sample_map_path": sample_map_path,
+        "sample_map_path_exists": sample_map_exists,
+        "reference_genome_path": reference_genome_path,
+        "reference_genome_path_exists": reference_genome_exists,
+        "genome_gff_path": genome_gff_path,
+        "genome_gff_path_exists": genome_gff_exists,
+        "annotation_path": annotation_path,
+        "annotation_path_exists": annotation_exists,
+        "rnaseq_read_paths": existing_rnaseq_read_paths,
+        "rnaseq_read_count": len(existing_rnaseq_read_paths),
+        "discovered_upload_files": {
+            "transcriptome_result_path": discovered_paths["transcriptome_result_path"],
+            "metabolome_path": discovered_paths["metabolome_path"],
+            "sample_map_path": discovered_paths["sample_map_path"],
+            "reference_genome_path": discovered_paths["reference_genome_path"],
+            "genome_gff_path": discovered_paths["genome_gff_path"],
+            "annotation_path": discovered_paths["annotation_path"],
+            "rnaseq_read_paths": discovered_paths["rnaseq_read_paths"],
+        },
         "evidence_level": evidence_level,
         "data_source": evidence_level,
     }
@@ -523,19 +683,10 @@ def build_omics_evidence_pack_from_context(
     context: OmicsBreedingAnalysisContext,
 ) -> dict[str, Any]:
     """根据 Context 中的路径读取证据，并构建 Evidence Pack。"""
-
-    transcriptome_path = _resolve_context_file_path(
-        context.transcriptome_result_path,
-        context=context,
-    )
-    literature_path = _resolve_context_file_path(
-        context.literature_evidence_path,
-        context=context,
-    )
-    metabolome_path = _resolve_context_file_path(
-        context.metabolome_path,
-        context=context,
-    )
+    input_diagnostics = collect_input_file_diagnostics(context)
+    transcriptome_path = input_diagnostics["transcriptome_result_path"]
+    literature_path = input_diagnostics["literature_evidence_path"]
+    metabolome_path = input_diagnostics["metabolome_path"]
 
     # 从 Context 读取转录组文件路径
     transcriptome_records = read_transcriptome_records(transcriptome_path)
@@ -545,14 +696,6 @@ def build_omics_evidence_pack_from_context(
         trait=context.trait,
     )
     literature_records = literature_diagnostics["records"]
-    # 收集输入路径诊断
-    normalized_context = replace(
-        context,
-        transcriptome_result_path=transcriptome_path,
-        metabolome_path=metabolome_path,
-        literature_evidence_path=literature_path,
-    )
-    input_diagnostics = collect_input_file_diagnostics(normalized_context)
     smoke_gene_ids_path = Path(input_diagnostics["data_dir"]) / "smoke_gene_ids.txt"
     smoke_gene_ids = _read_smoke_gene_ids(smoke_gene_ids_path)
     # 代谢组目前只做“文件存在性摘要”

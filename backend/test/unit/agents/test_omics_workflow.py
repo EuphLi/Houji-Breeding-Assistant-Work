@@ -5,6 +5,8 @@ import json
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
 )
+import pytest
+
 from yuxi.agents.buildin.omics_breeding_analysis.workflow import (
     prepare_omics_evidence_pack_from_context,
     prepare_omics_evidence_pack_from_tool_results,
@@ -19,7 +21,20 @@ from yuxi.agents.buildin.omics_breeding_analysis.workflow import (
 # 构建 Evidence Pack
 # ↓
 # 写出 omics_evidence_pack.json
-def test_prepare_omics_evidence_pack_from_context_writes_json(tmp_path):
+def test_prepare_omics_evidence_pack_from_context_writes_json(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "queries": [],
+            "records": [],
+            "warnings": [],
+        },
+    )
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
         "gene_id\tlogFC\tpvalue\tpadj\n"
@@ -46,7 +61,7 @@ def test_prepare_omics_evidence_pack_from_context_writes_json(tmp_path):
 
     result = prepare_omics_evidence_pack_from_context(context)
 
-    assert result["status"] == "completed_with_warnings"
+    assert result["status"] == "completed"
     assert result["evidence_pack_path"] == str(output_path)
     assert result["artifacts"] == [str(output_path)]
     assert result["summary"]["target_genes"] == ["GeneA"]

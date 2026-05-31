@@ -41,6 +41,10 @@ def test_prepare_cited_guarded_omics_analysis_from_context_writes_final_result(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
         "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
         lambda **kwargs: {
             "status": "disabled_for_unit_test",

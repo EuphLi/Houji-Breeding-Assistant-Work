@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from yuxi.agents.buildin.omics_breeding_analysis.citation_engine import (
+    CitationSource,
     build_breeding_analysis_prompt,
     build_citation_result,
     build_citation_sources,
@@ -79,8 +80,12 @@ def test_build_literature_cards_from_sources():
     assert cards[0]["quoted_sentence"] == "Verified sentence."
 
 
-# 测试验证 fallback citation result 能生成用户正文和结构化 citation 结果，且 DOI/quoted_sentence 只保留在 JSON。
-def test_build_citation_result_uses_rule_fallback_without_hardcoding():
+# 测试验证 fallback citation result 能生成用户正文和结构化 citation 结果。
+def test_build_citation_result_uses_rule_fallback_without_hardcoding(monkeypatch):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
     result = build_citation_result(
         evidence_pack=_sample_evidence_pack(),
         question="根据数据给出候选验证方案",
@@ -159,3 +164,167 @@ def test_build_claim_trace_marks_cited_and_uncited_segments():
     assert trace[1]["source_status"] == "supported"
     assert trace[2]["citation_ids"] == []
     assert trace[2]["source_status"] == "uncited"
+
+
+def test_build_citation_result_keeps_supported_claims_for_background_and_metabolome():
+    evidence_pack = _sample_evidence_pack()
+    evidence_pack["evidence"]["metabolome_context"] = [
+        {
+            "evidence_id": "M1",
+            "summary": "检测到代谢组结果文件，黄酮相关化合物存在分层差异。",
+            "preview_text": "compound\tvalue\nflavonoid_a\t12.5",
+            "source_file": "metabolome_raw_3372.tsv",
+        }
+    ]
+    evidence_pack["background_literature_records"] = [
+        {
+            "citation_id": "BG1",
+            "title": "Background flavonoid paper",
+            "pmid": "123456",
+            "doi": "10.5678/bg",
+            "quoted_sentence": "Background evidence supports flavonoid accumulation differences.",
+            "source": "PubMed",
+            "query": "foxtail millet flavonoid",
+            "quote_scope": "abstract",
+            "relevance_level": "background",
+        }
+    ]
+    evidence_pack["debug"] = {
+        "inputs": {
+            "transcriptome_path_exists": True,
+            "metabolome_path_exists": True,
+            "evidence_level": "user_provided_path",
+        }
+    }
+
+    result = build_citation_result(
+        evidence_pack=evidence_pack,
+        question="根据数据给出候选验证方案",
+        use_llamaindex=False,
+        model_name="",
+    )
+
+    supported_ids = {
+        citation_id
+        for row in result["claim_trace"]
+        for citation_id in row["citation_ids"]
+    }
+
+    assert {"T1", "L1", "M1", "BG1"}.issubset(supported_ids)
+    assert any(row["source_status"] == "supported" for row in result["claim_trace"])
+
+
+def test_build_claim_trace_skips_markdown_table_separators_and_headers():
+    sources = [
+        CitationSource(
+            citation_id="M1",
+            source_type="metabolome_context",
+            text="metabolome",
+            metadata={},
+        )
+    ]
+
+    trace = build_claim_trace(
+        answer_markdown="\n".join(
+            [
+                "# 标题",
+                "## 文献依据",
+                "| 列1 | 列2 |",
+                "| --- | --- |",
+                "- 黄酮相关化合物存在分层差异。[M1]",
+            ]
+        ),
+        sources=sources,
+    )
+
+    assert len(trace) == 1
+    assert trace[0]["citation_ids"] == ["M1"]
+
+
+def test_build_citation_result_for_flavonoid_trait_keeps_trait_specific_acceptance_items(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    evidence_pack = {
+        "task": {
+            "trait": "黄酮相关",
+            "question": "请给出一些育种建议",
+        },
+        "targets": {
+            "genes": [],
+            "trait_terms": ["黄酮相关"],
+        },
+        "evidence": {
+            "transcriptome": [],
+            "literature": [],
+            "metabolome_context": [
+                {
+                    "evidence_id": "M1",
+                    "summary": "黄酮相关化合物在不同材料间存在分层差异。",
+                    "preview_text": "compound\tvalue\nflavonoid_a\t12.5",
+                    "source_file": "metabolome_raw_3372.tsv",
+                }
+            ],
+            "genome_context": [],
+        },
+        "background_literature_records": [
+            {
+                "citation_id": "BG1",
+                "title": "Flavonoid pathway in foxtail millet",
+                "pmid": "123456",
+                "doi": "10.5678/bg",
+                "quoted_sentence": "Flavonoid accumulation changed in millet leaves.",
+                "source": "PubMed",
+                "query": "Setaria italica flavonoid",
+                "quote_scope": "abstract",
+                "relevance_level": "background",
+            }
+        ],
+        "debug": {
+            "inputs": {
+                "trait": "黄酮相关",
+                "metabolome_path_exists": True,
+                "transcriptome_path_exists": False,
+                "evidence_level": "user_provided_path",
+            }
+        },
+    }
+
+    result = build_citation_result(
+        evidence_pack=evidence_pack,
+        question="请给出一些育种建议",
+        use_llamaindex=False,
+        model_name="",
+    )
+
+    assert "Si9g037800" in result["answer_markdown"]
+    assert "群体" in result["answer_markdown"]
+    assert "黄酮" in result["answer_markdown"]
+    assert "10.5678/bg" not in result["answer_markdown"]
+    assert "Flavonoid accumulation changed in millet leaves." not in result["answer_markdown"]
+    assert result["literature_cards"][0]["doi"] == "10.5678/bg"
+    assert (
+        result["literature_cards"][0]["quoted_sentence"]
+        == "Flavonoid accumulation changed in millet leaves."
+    )
+
+
+def test_build_citation_result_for_yield_trait_does_not_force_flavonoid_template():
+    evidence_pack = _sample_evidence_pack()
+    evidence_pack["task"]["trait"] = "高产相关"
+    evidence_pack["targets"]["trait_terms"] = ["高产相关"]
+
+    result = build_citation_result(
+        evidence_pack=evidence_pack,
+        question="围绕高产相关给出一些育种建议",
+        use_llamaindex=False,
+        model_name="",
+    )
+
+    assert "高产" in result["answer_markdown"] or "产量" in result["answer_markdown"]
+    assert "群体" in result["answer_markdown"]
+    assert "Si9g037800" not in result["answer_markdown"]
+    assert "黄酮" not in result["answer_markdown"]

@@ -148,17 +148,17 @@ def _resolve_direct_transcriptome_result_path(
     *,
     data_dir: str,
 ) -> str:
+    transcriptome_output_dir = f"{data_dir}/transcriptome_deg"
     resolved_explicit_path = _resolve_direct_input_path(
         explicit_path,
         data_dir=data_dir,
-        default_filename="significant_de_genes.tsv",
+        default_filename="transcriptome_deg/significant_de_genes.tsv",
     )
     existing_path = _first_existing_path(
         [
             resolved_explicit_path,
-            f"{data_dir}/smoke_de_out/04_de/significant_de_genes.tsv",
-            f"{data_dir}/04_de/significant_de_genes.tsv",
-            f"{data_dir}/de_pipeline_out/04_de/significant_de_genes.tsv",
+            f"{transcriptome_output_dir}/significant_de_genes.tsv",
+            f"{transcriptome_output_dir}/de_pipeline_out/04_de/significant_de_genes.tsv",
         ]
     )
     return existing_path or resolved_explicit_path

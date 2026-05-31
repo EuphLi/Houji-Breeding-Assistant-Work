@@ -10,11 +10,13 @@ import { agentApi, threadApi } from './agent_api'
 
 const TERMINAL_RUN_STATUSES = new Set([
   'completed',
+  'completed_with_warnings',
   'succeeded',
   'failed',
   'cancelled',
   'interrupted',
-  'error'
+  'error',
+  'finished'
 ])
 const FORMAL_OMICS_BREEDING_TOOL = 'omics_breeding_analysis_run'
 const USER_VISIBLE_TOOL_NAMES = new Set([FORMAL_OMICS_BREEDING_TOOL])
@@ -549,7 +551,8 @@ export const runBreedingWorkbench = async ({
     }
 
     // 终态判断
-    if (TERMINAL_RUN_STATUSES.has(status)) {
+    const normalizedSnapshotStatus = String(snapshot.status || '').trim().toLowerCase()
+    if (TERMINAL_RUN_STATUSES.has(normalizedSnapshotStatus)) {
       // 最终结果来自 history，而不是前端自己拼接 markdown。
       // 这样可以保证页面展示的是后端真实落库的消息内容。
       return snapshot

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,10 @@ from yuxi.agents.toolkits.buildin.pubmed import pubmed_search
 def test_omics_breeding_analysis_tool_impl_writes_final_result(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
     monkeypatch.setattr(
         omics_workflow,
         "search_background_literature",
@@ -349,3 +354,306 @@ def test_build_literature_queries_adds_trait_specific_pubmed_terms():
     assert any("flavonoid" in item.lower() for item in flavonoid_queries)
     assert any("drought" in item.lower() or "abiotic stress" in item.lower() for item in drought_queries)
     assert any("yield" in item.lower() for item in yield_queries)
+
+
+def test_omics_breeding_analysis_tool_marks_fastq_pipeline_failure_without_missing_input(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "sample1_R1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (upload_root / "metabolome_raw_3372.tsv").write_text("compound\tvalue\nflavonoid_a\t12.5\n", encoding="utf-8")
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline failed\n", encoding="utf-8")
+            return {
+                "status": "error",
+                "significant_de_genes_path": "",
+                "missing_inputs": [],
+                "missing_tools": [],
+                "pipeline_result": {"attempted": True, "returncode": 1},
+                "artifacts": [str(out_dir / "transcriptome_manifest.json"), str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path=str(upload_root / "metabolome_raw_3372.tsv"),
+        reference_genome_path=str(upload_root / "genome.fa"),
+        genome_gff_path=str(upload_root / "genome.gff"),
+        annotation_path="",
+        sample_map_path=str(upload_root / "sampleName_clientId.txt"),
+        rnaseq_read_paths=[str(fq_dir / "sample1_R1.fq.gz")],
+        upload_root=str(upload_root),
+        uploaded_file_count=5,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["summary"]["transcriptome_input_status"] == "fastq_uploaded"
+    assert result["summary"]["transcriptome_pipeline_status"] == "failed"
+    assert result["summary"]["pipeline_log_path"].endswith("run.log")
+    assert result["summary"]["pipeline_log_path"].startswith(str(upload_root / "transcriptome_deg"))
+    assert result["summary"]["data_source"] == "user_provided_path"
+    assert result["summary"]["metabolome_path_exists"] is True
+
+
+def test_omics_breeding_analysis_tool_runs_fixed_pipeline_into_upload_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "sample1_R1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (upload_root / "metabolome_raw_3372.tsv").write_text("compound\tvalue\ntrait_a\t12.5\n", encoding="utf-8")
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            deg_path = out_dir / "significant_de_genes.tsv"
+            deg_path.write_text(
+                "gene_id\tlogFC\tpvalue\tpadj\nGeneA\t1.5\t0.01\t0.03\n",
+                encoding="utf-8",
+            )
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline completed\n", encoding="utf-8")
+            manifest = out_dir / "manifest.json"
+            manifest.write_text("{\"status\":\"completed\"}\n", encoding="utf-8")
+            return {
+                "status": "completed",
+                "significant_de_genes_path": str(deg_path),
+                "pipeline_result": {"attempted": True, "returncode": 0},
+                "artifacts": [str(deg_path), str(manifest), str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="高产相关",
+        question="围绕高产相关给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path=str(upload_root / "metabolome_raw_3372.tsv"),
+        reference_genome_path=str(upload_root / "genome.fa"),
+        genome_gff_path=str(upload_root / "genome.gff"),
+        annotation_path="",
+        sample_map_path=str(upload_root / "sampleName_clientId.txt"),
+        rnaseq_read_paths=[str(fq_dir / "sample1_R1.fq.gz")],
+        upload_root=str(upload_root),
+        uploaded_file_count=5,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    expected_deg = upload_root / "transcriptome_deg" / "significant_de_genes.tsv"
+    assert result["summary"]["transcriptome_pipeline_status"] == "completed"
+    assert result["summary"]["transcriptome_input_status"] == "deg_generated_from_fastq"
+    assert result["summary"]["transcriptome_path_exists"] is True
+    assert result["summary"]["transcriptome_result_path"] == str(expected_deg)
+    assert result["summary"]["pipeline_log_path"] == str(upload_root / "transcriptome_deg" / "run.log")
+    assert result["summary"]["data_source"] == "omics_pipeline_generated"
+    assert result["summary"]["metabolome_path_exists"] is True
+
+
+def test_omics_breeding_analysis_tool_discovers_upload_root_inputs_before_pipeline(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "A_1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (fq_dir / "A_2.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (upload_root / "metabolome_raw_3372.tsv").write_text("compound\tvalue\ntrait_a\t12.5\n", encoding="utf-8")
+
+    captured_payload: dict[str, object] = {}
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            captured_payload.update(payload)
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            deg_path = out_dir / "significant_de_genes.tsv"
+            deg_path.write_text(
+                "gene_id\tlogFC\tpvalue\tpadj\nGeneA\t1.5\t0.01\t0.03\n",
+                encoding="utf-8",
+            )
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline completed\n", encoding="utf-8")
+            return {
+                "status": "completed",
+                "significant_de_genes_path": str(deg_path),
+                "pipeline_result": {"attempted": True, "returncode": 0},
+                "artifacts": [str(deg_path), str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="高产相关",
+        question="围绕高产相关给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path="",
+        genome_gff_path="",
+        annotation_path="",
+        sample_map_path="",
+        rnaseq_read_paths=[],
+        upload_root=str(upload_root),
+        uploaded_file_count=6,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert captured_payload["data_dir"] == str(upload_root)
+    assert captured_payload["fq_dir"] == "fq"
+    assert captured_payload["sample_map"] == "sampleName_clientId.txt"
+    assert captured_payload["genome_fa"] == "genome.fa"
+    assert captured_payload["genome_gff"] == "genome.gff"
+    assert captured_payload["out_dir"] == str(upload_root / "transcriptome_deg")
+    assert result["summary"]["transcriptome_pipeline_status"] == "completed"
+    assert result["summary"]["transcriptome_path_exists"] is True
+    assert result["summary"]["metabolome_path_exists"] is True
+    assert result["summary"]["submitted_rnaseq_read_paths"] == []
+    assert result["summary"]["normalized_rnaseq_read_paths"]
+
+
+def test_omics_breeding_analysis_tool_creates_run_log_when_fastq_inputs_incomplete(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "A_1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "metabolome_raw_3372.tsv").write_text("compound\tvalue\ntrait_a\t12.5\n", encoding="utf-8")
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="抗旱相关",
+        question="围绕抗旱相关给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path="",
+        genome_gff_path="",
+        annotation_path="",
+        sample_map_path="",
+        rnaseq_read_paths=[],
+        upload_root=str(upload_root),
+        uploaded_file_count=4,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    run_log = upload_root / "transcriptome_deg" / "run.log"
+    assert run_log.exists()
+    assert "missing genome.gff" in run_log.read_text(encoding="utf-8")
+    assert result["summary"]["transcriptome_pipeline_status"] == "not_enough_inputs"
+    assert result["summary"]["transcriptome_input_status"] == "fastq_uploaded"
+    assert result["summary"]["pipeline_log_path"] == str(run_log)
+    assert result["summary"]["data_source"] == "user_provided_path"
+    assert result["summary"]["metabolome_path_exists"] is True

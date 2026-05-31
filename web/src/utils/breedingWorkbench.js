@@ -53,10 +53,8 @@ export const DEFAULT_SMOKE_BREEDING_CONTEXT = {
 export const REQUIRED_BREEDING_FIELDS = [
   { key: 'reference_genome', label: '参考基因组' },
   { key: 'genome_gff', label: '基因组注释' },
-  { key: 'function_annotation', label: '基因功能注释' },
   { key: 'rnaseq_reads', label: 'RNA-seq Reads' },
   { key: 'sample_map', label: '数据标签' },
-  { key: 'usage_doc', label: '流程说明' },
   { key: 'metabolome_tsv', label: '代谢含量' },
   { key: 'trait', label: '性状输入' },
   { key: 'user_question', label: '用户问题' }

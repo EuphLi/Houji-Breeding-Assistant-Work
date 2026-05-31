@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
 )
+from yuxi.agents.buildin.omics_breeding_analysis.evidence_adapters import (
+    discover_context_input_paths,
+)
 from yuxi.agents.buildin.omics_breeding_analysis.workflow import (
     prepare_cited_guarded_omics_analysis_from_context,
 )
@@ -151,58 +154,188 @@ def _run_omics_breeding_analysis_impl(
         else out_path / "omics_evidence_pack.json"
     )
 
-    rnaseq_read_paths = list(rnaseq_read_paths or [])
+    submitted_rnaseq_read_paths = list(rnaseq_read_paths or [])
+    submitted_sample_map_path = str(sample_map_path or "").strip()
+    submitted_reference_genome_path = str(reference_genome_path or "").strip()
+    submitted_genome_gff_path = str(genome_gff_path or "").strip()
+    submitted_annotation_path = str(annotation_path or "").strip()
+    submitted_metabolome_path = str(metabolome_path or "").strip()
+
+    discovery_context = OmicsBreedingAnalysisContext(
+        trait=trait,
+        question=question,
+        transcriptome_result_path=str(transcriptome_result_path or "").strip(),
+        metabolome_path=submitted_metabolome_path,
+        reference_genome_path=submitted_reference_genome_path,
+        genome_gff_path=submitted_genome_gff_path,
+        annotation_path=submitted_annotation_path,
+        sample_map_path=submitted_sample_map_path,
+        rnaseq_read_paths=submitted_rnaseq_read_paths,
+        upload_root=str(upload_root or "").strip(),
+        uploaded_file_count=max(0, int(uploaded_file_count or 0)),
+        literature_evidence_path=str(literature_evidence_path or "").strip(),
+        evidence_pack_output_path=str(evidence_pack_path),
+        model=model,
+    )
+    discovered_paths = discover_context_input_paths(discovery_context) if upload_root else {}
+
+    normalized_rnaseq_read_paths = submitted_rnaseq_read_paths or list(discovered_paths.get("rnaseq_read_paths") or [])
+    normalized_sample_map_path = submitted_sample_map_path or str(discovered_paths.get("sample_map_path") or "").strip()
+    normalized_reference_genome_path = submitted_reference_genome_path or str(
+        discovered_paths.get("reference_genome_path") or ""
+    ).strip()
+    normalized_genome_gff_path = submitted_genome_gff_path or str(discovered_paths.get("genome_gff_path") or "").strip()
+    normalized_annotation_path = submitted_annotation_path or str(discovered_paths.get("annotation_path") or "").strip()
+    normalized_metabolome_path = submitted_metabolome_path or str(discovered_paths.get("metabolome_path") or "").strip()
 
     transcriptome_pipeline_status = "not_enough_inputs"
     transcriptome_pipeline_details: dict[str, Any] = {}
+    pipeline_log_path = ""
+    transcriptome_pipeline_error = ""
+    transcriptome_pipeline_output_dir = ""
+    transcriptome_pipeline_attempted = False
+    transcriptome_pipeline_decision_reason = ""
+    resolved_pipeline_script_path = ""
+    missing_pipeline_inputs: list[str] = []
     normalized_transcriptome_path = str(transcriptome_result_path or "").strip()
+    transcriptome_out_dir = Path(upload_root).expanduser().resolve() / "transcriptome_deg" if upload_root else None
+    transcriptome_existing_deg_path = (
+        transcriptome_out_dir / "significant_de_genes.tsv" if transcriptome_out_dir else None
+    )
+
+    def _ensure_pipeline_log(lines: list[str]) -> str:
+        if transcriptome_out_dir is None:
+            return ""
+        transcriptome_out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = transcriptome_out_dir / "run.log"
+        log_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return str(log_path)
+
     if normalized_transcriptome_path and Path(normalized_transcriptome_path).is_file():
         transcriptome_pipeline_status = "skipped_existing_deg"
-    elif upload_root and sample_map_path and genome_gff_path and reference_genome_path and rnaseq_read_paths:
-        from yuxi.agents.toolkits.breeding.tools import breeding_transcriptome_deg
+    elif transcriptome_existing_deg_path and transcriptome_existing_deg_path.is_file():
+        normalized_transcriptome_path = str(transcriptome_existing_deg_path)
+        transcriptome_pipeline_status = "skipped_existing_deg"
+    elif upload_root and normalized_rnaseq_read_paths:
+        missing_pipeline_inputs: list[str] = []
+        if not normalized_sample_map_path:
+            missing_pipeline_inputs.append("missing sampleName_clientId.txt")
+        if not normalized_reference_genome_path:
+            missing_pipeline_inputs.append("missing genome.fa or genome.fasta")
+        if not normalized_genome_gff_path:
+            missing_pipeline_inputs.append("missing genome.gff or genome.gff3")
 
-        data_dir_path = Path(upload_root).expanduser().resolve()
-        fq_parent = Path(rnaseq_read_paths[0]).expanduser().resolve().parent if rnaseq_read_paths else data_dir_path / "fq"
-        try:
-            transcriptome_tool_result = breeding_transcriptome_deg.invoke(
-                {
-                    "data_dir": str(data_dir_path),
-                    "fq_dir": _relative_to_data_dir(str(fq_parent), data_dir_path),
-                    "sample_map": _relative_to_data_dir(sample_map_path, data_dir_path),
-                    "genome_fa": _relative_to_data_dir(reference_genome_path, data_dir_path),
-                    "genome_gff": _relative_to_data_dir(genome_gff_path, data_dir_path),
-                    "out_dir": str(out_path / "transcriptome_deg"),
-                    "threads": 8,
-                    "run_pipeline": True,
-                }
+        if missing_pipeline_inputs:
+            transcriptome_pipeline_status = "not_enough_inputs"
+            transcriptome_pipeline_error = "; ".join(missing_pipeline_inputs)
+            transcriptome_pipeline_output_dir = str(transcriptome_out_dir)
+            transcriptome_pipeline_decision_reason = "missing_required_inputs"
+            pipeline_log_path = _ensure_pipeline_log(
+                [
+                    "FASTQ detected under upload_root, but transcriptome pipeline was not started.",
+                    *missing_pipeline_inputs,
+                ]
             )
-            transcriptome_pipeline_details = transcriptome_tool_result or {}
-            generated_path = str(transcriptome_tool_result.get("significant_de_genes_path") or "").strip()
-            missing_tools = transcriptome_tool_result.get("missing_tools") or []
-            if generated_path and Path(generated_path).is_file():
-                normalized_transcriptome_path = generated_path
-                transcriptome_pipeline_status = "completed"
-            elif missing_tools:
-                transcriptome_pipeline_status = "dependency_missing"
-            else:
+        else:
+            from yuxi.agents.toolkits.breeding.tools import breeding_transcriptome_deg
+
+            data_dir_path = Path(upload_root).expanduser().resolve()
+            transcriptome_pipeline_output_dir = str(transcriptome_out_dir)
+            fq_parent = Path(normalized_rnaseq_read_paths[0]).expanduser().resolve().parent
+            try:
+                transcriptome_tool_result = breeding_transcriptome_deg.invoke(
+                    {
+                        "data_dir": str(data_dir_path),
+                        "fq_dir": _relative_to_data_dir(str(fq_parent), data_dir_path),
+                        "sample_map": _relative_to_data_dir(normalized_sample_map_path, data_dir_path),
+                        "genome_fa": _relative_to_data_dir(normalized_reference_genome_path, data_dir_path),
+                        "genome_gff": _relative_to_data_dir(normalized_genome_gff_path, data_dir_path),
+                        "out_dir": str(transcriptome_out_dir),
+                        "threads": 8,
+                        "run_pipeline": True,
+                    }
+                )
+                transcriptome_pipeline_details = transcriptome_tool_result or {}
+                transcriptome_pipeline_attempted = bool(
+                    (transcriptome_tool_result.get("pipeline_result") or {}).get("attempted")
+                )
+                transcriptome_pipeline_decision_reason = str(
+                    transcriptome_tool_result.get("transcriptome_pipeline_decision_reason") or ""
+                ).strip()
+                resolved_pipeline_script_path = str(
+                    transcriptome_tool_result.get("resolved_pipeline_script_path") or ""
+                ).strip()
+                missing_pipeline_inputs = list(transcriptome_tool_result.get("missing_inputs") or [])
+                if transcriptome_tool_result.get("transcriptome_pipeline_runner"):
+                    transcriptome_pipeline_details["transcriptome_pipeline_runner"] = (
+                        transcriptome_tool_result.get("transcriptome_pipeline_runner")
+                    )
+                if transcriptome_tool_result.get("dependency_check_mode"):
+                    transcriptome_pipeline_details["dependency_check_mode"] = (
+                        transcriptome_tool_result.get("dependency_check_mode")
+                    )
+                if transcriptome_tool_result.get("missing_tools") is not None:
+                    transcriptome_pipeline_details["missing_tools"] = (
+                        transcriptome_tool_result.get("missing_tools") or []
+                    )
+                if transcriptome_tool_result.get("missing_r_packages") is not None:
+                    transcriptome_pipeline_details["missing_r_packages"] = (
+                        transcriptome_tool_result.get("missing_r_packages") or []
+                    )
+                pipeline_log_path = next(
+                    (
+                        str(path).strip()
+                        for path in (transcriptome_tool_result.get("artifacts") or [])
+                        if str(path).strip().endswith("run.log")
+                    ),
+                    "",
+                )
+                generated_path = str(transcriptome_tool_result.get("significant_de_genes_path") or "").strip()
+                if generated_path and Path(generated_path).is_file():
+                    normalized_transcriptome_path = generated_path
+                    transcriptome_pipeline_status = "completed"
+                else:
+                    transcriptome_pipeline_status = "failed"
+                    transcriptome_pipeline_error = (
+                        str(transcriptome_tool_result.get("error") or "").strip()
+                        or str((transcriptome_tool_result.get("pipeline_result") or {}).get("error") or "").strip()
+                        or ", ".join(transcriptome_tool_result.get("missing_tools") or [])
+                        or ", ".join(transcriptome_tool_result.get("missing_inputs") or [])
+                        or f"pipeline_returncode={(transcriptome_tool_result.get('pipeline_result') or {}).get('returncode')}"
+                    )
+                    if not pipeline_log_path:
+                        pipeline_log_path = _ensure_pipeline_log(
+                            [
+                                "Transcriptome pipeline returned without a DEG output file.",
+                                f"error: {transcriptome_pipeline_error or 'unknown_error'}",
+                            ]
+                        )
+            except Exception as exc:  # noqa: BLE001
                 transcriptome_pipeline_status = "failed"
-        except Exception as exc:  # noqa: BLE001
-            transcriptome_pipeline_status = "failed"
-            transcriptome_pipeline_details = {"error": str(exc)}
+                transcriptome_pipeline_details = {"error": str(exc)}
+                transcriptome_pipeline_error = str(exc)
+                transcriptome_pipeline_decision_reason = "tool_invoke_exception"
+                pipeline_log_path = _ensure_pipeline_log(
+                    [
+                        "Transcriptome pipeline raised an exception before completion.",
+                        str(exc),
+                    ]
+                )
     elif normalized_transcriptome_path:
         transcriptome_pipeline_status = "failed"
+        transcriptome_pipeline_error = "transcriptome_result_path_provided_but_not_found"
 
     # 构造 OmicsBreedingAnalysisContext
     context = OmicsBreedingAnalysisContext(
         trait=trait,
         question=question,
         transcriptome_result_path=normalized_transcriptome_path,
-        metabolome_path=metabolome_path,
-        reference_genome_path=reference_genome_path,
-        genome_gff_path=genome_gff_path,
-        annotation_path=annotation_path,
-        sample_map_path=sample_map_path,
-        rnaseq_read_paths=rnaseq_read_paths,
+        metabolome_path=normalized_metabolome_path,
+        reference_genome_path=normalized_reference_genome_path,
+        genome_gff_path=normalized_genome_gff_path,
+        annotation_path=normalized_annotation_path,
+        sample_map_path=normalized_sample_map_path,
+        rnaseq_read_paths=normalized_rnaseq_read_paths,
         upload_root=upload_root,
         uploaded_file_count=max(0, int(uploaded_file_count or 0)),
         literature_evidence_path=literature_evidence_path,
@@ -218,24 +351,61 @@ def _run_omics_breeding_analysis_impl(
     )
 
     summary = result.get("summary") or {}
+    if transcriptome_pipeline_status == "completed" and normalized_transcriptome_path:
+        summary["transcriptome_input_status"] = "deg_generated_from_fastq"
+        summary["data_source"] = "omics_pipeline_generated"
+        summary["evidence_level"] = "omics_pipeline_generated"
     summary.update(
         {
             "transcriptome_pipeline_status": transcriptome_pipeline_status,
             "transcriptome_result_path": normalized_transcriptome_path,
             "upload_root": upload_root,
             "uploaded_file_count": max(0, int(uploaded_file_count or 0)),
-            "sample_map_path": sample_map_path,
-            "sample_map_path_exists": bool(sample_map_path) and Path(sample_map_path).is_file(),
-            "rnaseq_read_count": len(rnaseq_read_paths or []),
+            "sample_map_path": normalized_sample_map_path,
+            "sample_map_path_exists": bool(normalized_sample_map_path) and Path(normalized_sample_map_path).is_file(),
+            "rnaseq_read_count": len(normalized_rnaseq_read_paths or []),
+            "submitted_upload_root": upload_root,
+            "submitted_transcriptome_result_path": transcriptome_result_path,
+            "submitted_metabolome_path": submitted_metabolome_path,
+            "submitted_reference_genome_path": submitted_reference_genome_path,
+            "submitted_genome_gff_path": submitted_genome_gff_path,
+            "submitted_annotation_path": submitted_annotation_path,
+            "submitted_sample_map_path": submitted_sample_map_path,
+            "submitted_rnaseq_read_paths": list(submitted_rnaseq_read_paths),
+            "normalized_metabolome_path": normalized_metabolome_path,
+            "normalized_reference_genome_path": normalized_reference_genome_path,
+            "normalized_genome_gff_path": normalized_genome_gff_path,
+            "normalized_annotation_path": normalized_annotation_path,
+            "normalized_sample_map_path": normalized_sample_map_path,
+            "normalized_rnaseq_read_paths": list(normalized_rnaseq_read_paths),
+            "discovered_fastq_count": len(normalized_rnaseq_read_paths),
+            "discovered_upload_files": discovered_paths,
             "reference_file_count": len(
                 [
                     path
-                    for path in [reference_genome_path, genome_gff_path, annotation_path]
+                    for path in [
+                        normalized_reference_genome_path,
+                        normalized_genome_gff_path,
+                        normalized_annotation_path,
+                    ]
                     if str(path or "").strip()
                 ]
             ),
             "citation_backend": result.get("citation_backend") or result.get("backend") or "",
             "llamaindex_available": bool(result.get("llamaindex_available")),
+            "pipeline_log_path": pipeline_log_path,
+            "transcriptome_pipeline_error": transcriptome_pipeline_error,
+            "transcriptome_pipeline_output_dir": transcriptome_pipeline_output_dir,
+            "transcriptome_pipeline_attempted": transcriptome_pipeline_attempted,
+            "transcriptome_pipeline_decision_reason": transcriptome_pipeline_decision_reason,
+            "resolved_pipeline_script_path": resolved_pipeline_script_path,
+            "missing_pipeline_inputs": missing_pipeline_inputs,
+            "transcriptome_pipeline_runner": (
+                transcriptome_pipeline_details.get("transcriptome_pipeline_runner") or ""
+            ),
+            "dependency_check_mode": transcriptome_pipeline_details.get("dependency_check_mode") or "",
+            "missing_tools": transcriptome_pipeline_details.get("missing_tools") or [],
+            "missing_r_packages": transcriptome_pipeline_details.get("missing_r_packages") or [],
         }
     )
     if transcriptome_pipeline_details:

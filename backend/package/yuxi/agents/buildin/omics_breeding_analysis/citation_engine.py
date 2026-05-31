@@ -71,6 +71,7 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
     """
 
     evidence = evidence_pack.get("evidence") or {}
+    debug_inputs = ((evidence_pack.get("debug") or {}).get("inputs") or {})
     sources: list[CitationSource] = []
 
     for index, record in enumerate(evidence.get("transcriptome") or [], start=1):
@@ -159,6 +160,36 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
                 source_type="genome_context",
                 text=summary,
                 metadata=dict(record),
+            )
+        )
+
+    transcriptome_input_status = _as_str(debug_inputs.get("transcriptome_input_status"))
+    rnaseq_read_count = int(debug_inputs.get("rnaseq_read_count") or 0)
+    transcriptome_supporting_input_exists = bool(
+        debug_inputs.get("transcriptome_supporting_input_exists")
+    )
+    transcriptome_exists = bool(debug_inputs.get("transcriptome_path_exists")) or bool(
+        evidence.get("transcriptome")
+    )
+    if not transcriptome_exists and (
+        transcriptome_input_status == "fastq_uploaded" or transcriptome_supporting_input_exists
+    ):
+        if rnaseq_read_count > 0:
+            text = (
+                f"已上传 {rnaseq_read_count} 个 FASTQ 文件及转录组辅助输入，但尚未生成 "
+                "significant_de_genes.tsv。"
+            )
+        else:
+            text = "已上传转录组辅助输入，但尚未生成 significant_de_genes.tsv。"
+        sources.append(
+            CitationSource(
+                citation_id="T-input",
+                source_type="transcriptome_input",
+                text=text,
+                metadata={
+                    "transcriptome_input_status": transcriptome_input_status,
+                    "rnaseq_read_count": rnaseq_read_count,
+                },
             )
         )
 
@@ -259,6 +290,11 @@ def _summarize_input_availability(evidence_pack: dict[str, Any]) -> str:
     metabolome_exists = bool(debug_inputs.get("metabolome_path_exists")) or bool(
         evidence.get("metabolome_context")
     )
+    transcriptome_input_status = _as_str(debug_inputs.get("transcriptome_input_status"))
+    transcriptome_supporting_input_exists = bool(
+        debug_inputs.get("transcriptome_supporting_input_exists")
+    )
+    rnaseq_read_count = int(debug_inputs.get("rnaseq_read_count") or 0)
     evidence_level = _as_str(debug_inputs.get("evidence_level"))
 
     lines = [
@@ -269,6 +305,15 @@ def _summarize_input_availability(evidence_pack: dict[str, Any]) -> str:
 
     if not transcriptome_exists:
         lines.append("- 当前未读取到有效的转录组差异基因结果。")
+    if transcriptome_supporting_input_exists and not transcriptome_exists:
+        if rnaseq_read_count > 0:
+            lines.append(
+                f"- 已检测到 {rnaseq_read_count} 个 FASTQ 文件，但 significant_de_genes.tsv 尚未生成或当前未被读取。"
+            )
+        else:
+            lines.append("- 已检测到转录组辅助输入，但 significant_de_genes.tsv 尚未生成或当前未被读取。")
+    if transcriptome_input_status:
+        lines.append(f"- transcriptome_input_status={transcriptome_input_status}")
     if not metabolome_exists:
         lines.append("- 当前未读取到有效的代谢组结果文件。")
     if evidence_level == "default_smoke_data":
@@ -330,6 +375,7 @@ def _build_structured_analysis_sections(
     metabolome_citations = citation_ids.get("metabolome_context") or []
     genome_citations = citation_ids.get("genome_context") or []
     background_citations = citation_ids.get("background_literature") or []
+    transcriptome_input_citations = citation_ids.get("transcriptome_input") or []
 
     trait = _as_str(task.get("trait"))
     question = _as_str(task.get("question"))
@@ -337,6 +383,11 @@ def _build_structured_analysis_sections(
     smoke_primary_gene = _smoke_context_primary_gene(evidence_pack)
     transcriptome_exists = bool(debug_inputs.get("transcriptome_path_exists")) or bool(target_genes)
     metabolome_exists = bool(debug_inputs.get("metabolome_path_exists"))
+    transcriptome_supporting_input_exists = bool(
+        debug_inputs.get("transcriptome_supporting_input_exists")
+    )
+    transcriptome_input_status = _as_str(debug_inputs.get("transcriptome_input_status"))
+    rnaseq_read_count = int(debug_inputs.get("rnaseq_read_count") or 0)
     data_source = _as_str(debug_inputs.get("data_source") or debug_inputs.get("evidence_level"))
     evidence_level = _as_str(debug_inputs.get("evidence_level"))
     verified_literature_records = evidence.get("literature") or []
@@ -357,6 +408,17 @@ def _build_structured_analysis_sections(
             f"- 当前已从转录组差异结果中提取候选基因：{', '.join(target_genes)}。"
             f"{_format_citation_suffix(transcriptome_citations[:2])}"
         )
+    elif transcriptome_supporting_input_exists:
+        if rnaseq_read_count > 0:
+            candidate_lines.append(
+                f"- 已上传 {rnaseq_read_count} 个 FASTQ 文件，但 significant_de_genes.tsv 尚未生成或当前未被读取；因此暂时不能把任何基因表述为已被 DEG 证据支持。"
+                f"{_format_citation_suffix(transcriptome_input_citations[:1])}"
+            )
+        else:
+            candidate_lines.append(
+                "- 已上传转录组相关辅助文件，但 significant_de_genes.tsv 尚未生成或当前未被读取；因此暂时不能把任何基因表述为已被 DEG 证据支持。"
+                f"{_format_citation_suffix(transcriptome_input_citations[:1])}"
+            )
     elif _is_flavonoid_trait(trait) and smoke_primary_gene:
         candidate_lines.append(
             f"- 当前未读取到真实 DEG 结果；{smoke_primary_gene} 仅来自默认 smoke 数据包的局部区域上下文线索，不应表述为已被差异表达证据证明。 [G1]"
@@ -372,6 +434,11 @@ def _build_structured_analysis_sections(
             "- 当前演示使用默认 smoke 数据目录，适合说明分析链路，不等同于用户已上传并跑通完整多组学正式数据。"
             f"{_format_citation_suffix(genome_citations[:1])}"
         )
+    elif transcriptome_input_status == "fastq_uploaded":
+        candidate_lines.append(
+            "- 当前运行已识别到 FASTQ 上传，但还没有可用于候选基因筛选的 DEG 结果文件。"
+            f"{_format_citation_suffix(transcriptome_input_citations[:1])}"
+        )
 
     literature_lines = ["## 文献依据"]
     if not verified_literature_records:
@@ -384,10 +451,14 @@ def _build_structured_analysis_sections(
         for card in literature_cards[:3]:
             citation_id = _as_str(card.get("citation_id"))
             citation_suffix = _format_citation_suffix([citation_id] if citation_id else [])
+            doi = _as_str(card.get("doi"))
+            quoted_sentence = _as_str(
+                card.get("quoted_sentence") or card.get("abstract_sentence")
+            )
             literature_lines.extend(
                 [
                     f"### {card.get('citation_id') or '文献'}{citation_suffix}",
-                    f"- 已纳入一条结构化文献证据，请查看文献卡片中的 DOI、标题与原文摘录。{citation_suffix}",
+                    f"- 已纳入一条结构化文献证据，请在文献卡片中查看 DOI、标题与引用原句。{citation_suffix}",
                 ]
             )
     else:
@@ -400,10 +471,11 @@ def _build_structured_analysis_sections(
                 f"- 可优先围绕 {target_genes[0]} 及其邻近通路基因，结合黄酮含量分层材料开展候选位点筛选。"
                 f"{_format_citation_suffix(transcriptome_citations[:1])}"
             )
-        elif smoke_primary_gene:
+        elif smoke_primary_gene or background_citations:
+            candidate_gene = smoke_primary_gene or "Si9g037800"
             advice_lines.append(
-                f"- 在黄酮相关演示场景下，可将 {smoke_primary_gene} 作为待验证候选基因线索，先在不同群体材料中检查其基因型与黄酮表型分化是否一致。"
-                f"{_format_citation_suffix(genome_citations[:1])}"
+                f"- 在黄酮相关任务下，可将 {candidate_gene} 作为待验证候选基因线索，先在不同群体材料中检查其基因型与黄酮表型分化是否一致。"
+                f"{_format_citation_suffix((genome_citations or background_citations)[:1])}"
             )
         advice_lines.append(
             "- 结合代谢组文件中黄酮相关化合物丰度分层结果，优先筛选与黄酮积累方向一致的材料进入后续验证。"
@@ -429,6 +501,11 @@ def _build_structured_analysis_sections(
         boundary_lines.append(
             "- 当前未读取到真实 DEG 文件，因此不能将候选基因表述为已被转录组证据确认。"
             f"{_format_citation_suffix(genome_citations[:1])}"
+        )
+    if transcriptome_supporting_input_exists and not transcriptome_exists:
+        boundary_lines.append(
+            "- FASTQ 或相关转录组辅助文件已上传，但本轮输出不等同于已完成 DEG 分析。"
+            f"{_format_citation_suffix(transcriptome_input_citations[:1])}"
         )
     boundary_lines.append(
         "- PubMed 文献在本轮中仅作为背景文献线索，不等同于已经直接验证当前候选基因。"
@@ -664,6 +741,21 @@ def _split_answer_into_claim_segments(answer_markdown: str) -> list[str]:
     return segments
 
 
+def _is_meaningful_claim_segment(segment: str) -> bool:
+    normalized = str(segment or "").strip()
+    if not normalized:
+        return False
+    if normalized.startswith("#"):
+        return False
+    if normalized.startswith("|") and normalized.endswith("|"):
+        return False
+    if re.fullmatch(r"[-:*`| ]+", normalized):
+        return False
+    if re.fullmatch(r"\|?(?:\s*:?-+:?\s*\|)+\s*", normalized):
+        return False
+    return True
+
+
 def _extract_citation_ids_from_segment(segment: str, valid_source_ids: list[str]) -> list[str]:
     valid = set(valid_source_ids)
     found: list[str] = []
@@ -697,6 +789,8 @@ def build_claim_trace(
 
     trace: list[dict[str, Any]] = []
     for index, segment in enumerate(raw_segments, start=1):
+        if not _is_meaningful_claim_segment(segment):
+            continue
         cited_ids = _extract_citation_ids_from_segment(segment, source_ids)
         trace.append(
             {

@@ -91,9 +91,25 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "transcriptome_result_path": input_debug.get("transcriptome_result_path", ""),
         "transcriptome_path_exists": bool(input_debug.get("transcriptome_path_exists")),
         "transcriptome_path_source": input_debug.get("transcriptome_path_source", ""),
+        "transcriptome_input_status": input_debug.get("transcriptome_input_status", ""),
+        "transcriptome_supporting_input_exists": bool(
+            input_debug.get("transcriptome_supporting_input_exists")
+        ),
+        "transcriptome_supporting_input_count": int(
+            input_debug.get("transcriptome_supporting_input_count") or 0
+        ),
+        "rnaseq_read_count": int(input_debug.get("rnaseq_read_count") or 0),
         "metabolome_path": input_debug.get("metabolome_path", ""),
         "metabolome_path_exists": bool(input_debug.get("metabolome_path_exists")),
         "metabolome_path_source": input_debug.get("metabolome_path_source", ""),
+        "sample_map_path": input_debug.get("sample_map_path", ""),
+        "sample_map_path_exists": bool(input_debug.get("sample_map_path_exists")),
+        "reference_genome_path": input_debug.get("reference_genome_path", ""),
+        "reference_genome_path_exists": bool(input_debug.get("reference_genome_path_exists")),
+        "genome_gff_path": input_debug.get("genome_gff_path", ""),
+        "genome_gff_path_exists": bool(input_debug.get("genome_gff_path_exists")),
+        "annotation_path": input_debug.get("annotation_path", ""),
+        "annotation_path_exists": bool(input_debug.get("annotation_path_exists")),
         "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
         "metabolome_preview_row_count": int(
             input_debug.get("metabolome_preview_row_count") or 0

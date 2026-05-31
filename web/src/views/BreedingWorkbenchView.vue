@@ -184,57 +184,26 @@
 
               <div class="field-item">
                 <label class="field-label">流程说明</label>
-                <div
-                  class="file-input-row"
-                  :class="{ dragging: dragState.usage_doc }"
-                  @dragover.prevent="dragState.usage_doc = true"
-                  @dragleave.prevent="dragState.usage_doc = false"
-                  @drop.prevent="handleFileDrop('usage_doc', $event)"
-                >
-                  <div class="file-input-control">
-                    <a-input v-model:value="form.usage_doc" :disabled="running" />
-                    <a-button size="small" :disabled="running" @click="openFilePicker('usage_doc')">
-                      添加文件
-                    </a-button>
+                <div class="file-input-row file-output-row">
+                  <div class="file-output-note">
+                    <span>固定转录组流程由后端执行，不接受前端上传流程说明文件。</span>
                   </div>
-                  <input
-                    :ref="(el) => registerFileInput('usage_doc', el)"
-                    class="hidden-file-input"
-                    type="file"
-                    @change="handleSingleFileChange('usage_doc', $event)"
-                  />
                 </div>
               </div>
 
               <div class="field-item">
-                <label class="field-label">差异显著基因结果（可选）</label>
-                <div
-                  class="file-input-row"
-                  :class="{ dragging: dragState.transcriptome_result_path }"
-                  @dragover.prevent="dragState.transcriptome_result_path = true"
-                  @dragleave.prevent="dragState.transcriptome_result_path = false"
-                  @drop.prevent="handleFileDrop('transcriptome_result_path', $event)"
-                >
-                  <div class="file-input-control">
-                    <a-input v-model:value="form.transcriptome_result_path" :disabled="running" />
-                    <a-button
-                      size="small"
-                      :disabled="running"
-                      @click="openFilePicker('transcriptome_result_path')"
-                    >
-                      添加文件
-                    </a-button>
+                <label class="field-label">差异显著基因结果</label>
+                <div class="file-input-row file-output-row">
+                  <div class="file-output-note">
+                    <span><code>significant_de_genes.tsv</code> 只作为后端固定流程输出展示，不作为用户上传输入。</span>
                   </div>
-                  <input
-                    :ref="(el) => registerFileInput('transcriptome_result_path', el)"
-                    class="hidden-file-input"
-                    type="file"
-                    @change="handleSingleFileChange('transcriptome_result_path', $event)"
-                  />
                 </div>
               </div>
             </div>
-            <p class="hint-text">输出：差异显著基因 <code>significant_de_genes.tsv</code></p>
+            <p class="hint-text">
+              输入：<code>fq/*.fq.gz</code>、<code>sampleName_clientId.txt</code>、<code>genome.fa</code>、<code>genome.gff</code>；
+              输出：后端固定流程生成 <code>significant_de_genes.tsv</code>
+            </p>
           </a-collapse-panel>
 
           <a-collapse-panel key="metabolome" header="代谢组">
@@ -521,6 +490,9 @@
                     <span>transcriptome_pipeline_status</span><code>{{ businessSummary.transcriptome_pipeline_status || '-' }}</code>
                   </div>
                   <div class="diagnostic-item">
+                    <span>transcriptome_input_status</span><code>{{ businessSummary.transcriptome_input_status || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item">
                     <span>transcriptome_path_exists</span><code>{{ String(Boolean(businessSummary.transcriptome_path_exists)) }}</code>
                   </div>
                   <div class="diagnostic-item">
@@ -542,10 +514,31 @@
                     <span>llamaindex_available</span><code>{{ String(Boolean(businessSummary.llamaindex_available)) }}</code>
                   </div>
                   <div class="diagnostic-item">
+                    <span>pipeline_log_path</span><code>{{ businessSummary.pipeline_log_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item">
+                    <span>transcriptome_result_path</span><code>{{ businessSummary.transcriptome_result_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item">
                     <span>uploaded_file_count</span><code>{{ businessSummary.uploaded_file_count ?? 0 }}</code>
                   </div>
                   <div class="diagnostic-item full-span">
-                    <span>upload_root</span><code>{{ businessSummary.upload_root || '-' }}</code>
+                    <span>submitted_reference_genome_path</span><code>{{ businessSummary.submitted_reference_genome_path || businessSummary.reference_genome_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item full-span">
+                    <span>submitted_genome_gff_path</span><code>{{ businessSummary.submitted_genome_gff_path || businessSummary.genome_gff_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item full-span">
+                    <span>submitted_metabolome_path</span><code>{{ businessSummary.submitted_metabolome_path || businessSummary.metabolome_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item full-span">
+                    <span>submitted_sample_map_path</span><code>{{ businessSummary.submitted_sample_map_path || businessSummary.sample_map_path || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item full-span">
+                    <span>submitted_rnaseq_read_paths</span><code>{{ (businessSummary.submitted_rnaseq_read_paths || []).join(', ') || '-' }}</code>
+                  </div>
+                  <div class="diagnostic-item full-span">
+                    <span>upload_root</span><code>{{ businessSummary.submitted_upload_root || businessSummary.upload_root || '-' }}</code>
                   </div>
                 </div>
               </a-collapse-panel>
@@ -691,10 +684,8 @@ const dragState = reactive({
   reference_genome: false,
   genome_gff: false,
   function_annotation: false,
-  transcriptome_result_path: false,
   rnaseq_reads: false,
   sample_map: false,
-  usage_doc: false,
   metabolome_tsv: false,
   literature_evidence_path: false
 })
@@ -833,6 +824,40 @@ const openFilePicker = (key) => {
   fileInputRefs.get(key)?.click()
 }
 
+const normalizeFileName = (file) => String(file?.name || '').trim().toLowerCase()
+
+const validateFilesForField = (key, files) => {
+  const normalizedFiles = Array.from(files || []).filter(Boolean)
+  if (!normalizedFiles.length) return { files: normalizedFiles, error: '' }
+
+  if (key === 'rnaseq_reads') {
+    const invalidFile = normalizedFiles.find((file) => {
+      const name = normalizeFileName(file)
+      return !(
+        name.endsWith('.fq') ||
+        name.endsWith('.fastq') ||
+        name.endsWith('.fq.gz') ||
+        name.endsWith('.fastq.gz')
+      )
+    })
+    if (invalidFile) {
+      const invalidName = invalidFile.name || '未知文件'
+      if (normalizeFileName(invalidFile) === 'read_counts.tsv') {
+        return {
+          files: [],
+          error: 'read_counts.tsv 不是 FASTQ reads，也不是最终 significant_de_genes.tsv，请改为上传 fq/*.fq.gz 或 fq 文件夹。'
+        }
+      }
+      return {
+        files: [],
+        error: `${invalidName} 不是 FASTQ reads。RNA-seq Reads 仅接受 .fq/.fastq/.fq.gz/.fastq.gz 文件。`
+      }
+    }
+  }
+
+  return { files: normalizedFiles, error: '' }
+}
+
 // 这个函数在用户选择文件或拖拽文件后被调用。
 // 输入是字段 key、FileList 和是否多文件；输出是更新页面可见文件名。
 // 当前第一版不会把文件真正上传到后端，只把文件名写进上下文发给 Agent。
@@ -902,7 +927,10 @@ const syncUploadedServerPaths = (key, entries) => {
 }
 
 const uploadFilesForField = async (key, files, { multiple = false, subdir = '' } = {}) => {
-  const normalizedFiles = Array.from(files || []).filter(Boolean)
+  const { files: normalizedFiles, error } = validateFilesForField(key, files)
+  if (error) {
+    throw new Error(error)
+  }
   if (!normalizedFiles.length) return
 
   const virtualParent = subdir
@@ -1057,39 +1085,53 @@ const buildTrait = () => {
 // 这个函数在真正发起 Agent Run 前被调用。
 // 输入来自页面表单；输出是发给 API 层的标准上下文字段。
 // 这些值描述的是“本次要让 Tool 读取哪些文件/文件名”，不是前端自己做组学分析。
-const buildSubmissionContext = () => ({
-  data_dir: uploadedServerPaths.upload_root || DEFAULT_DATA_DIR,
-  upload_root: uploadedServerPaths.upload_root || '',
-  uploaded_file_count: uploadedServerPaths.uploaded_file_count || 0,
-  reference_genome: (form.reference_genome || '').trim() || DEFAULT_FORM.reference_genome,
-  reference_genome_path:
-    uploadedServerPaths.reference_genome_path ||
-    `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.reference_genome}`,
-  genome_gff: (form.genome_gff || '').trim() || DEFAULT_FORM.genome_gff,
-  genome_gff_path:
-    uploadedServerPaths.genome_gff_path || `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.genome_gff}`,
-  function_annotation: (form.function_annotation || '').trim() || DEFAULT_FORM.function_annotation,
-  annotation_path:
-    uploadedServerPaths.annotation_path || `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.function_annotation}`,
-  transcriptome_result_path:
-    uploadedServerPaths.transcriptome_result_path ||
-    `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.transcriptome_result_path}`,
-  rnaseq_reads: (form.rnaseq_reads || '').trim() || DEFAULT_FORM.rnaseq_reads,
-  rnaseq_read_paths:
-    uploadedServerPaths.rnaseq_read_paths.length > 0
-      ? uploadedServerPaths.rnaseq_read_paths
-      : [],
-  sample_map: (form.sample_map || '').trim() || DEFAULT_FORM.sample_map,
-  sample_map_path:
-    uploadedServerPaths.sample_map_path || `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.sample_map}`,
-  usage_doc: (form.usage_doc || '').trim() || DEFAULT_FORM.usage_doc,
-  metabolome_tsv: (form.metabolome_tsv || '').trim() || DEFAULT_FORM.metabolome_tsv,
-  metabolome_path:
-    uploadedServerPaths.metabolome_path || `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.metabolome_tsv}`,
-  literature_evidence_path:
-    uploadedServerPaths.literature_evidence_path ||
-    `${DEFAULT_DATA_DIR}/${DEFAULT_FORM.literature_evidence_path}`
-})
+const buildSubmissionContext = () => {
+  const hasUploadedBatch = Boolean(uploadedServerPaths.upload_root)
+  const resolvePath = (uploadedPath, defaultFilename, { optional = false } = {}) => {
+    if (uploadedPath) return uploadedPath
+    if (hasUploadedBatch && optional) return ''
+    return `${DEFAULT_DATA_DIR}/${defaultFilename}`
+  }
+
+  return {
+    data_dir: uploadedServerPaths.upload_root || DEFAULT_DATA_DIR,
+    upload_root: uploadedServerPaths.upload_root || '',
+    uploaded_file_count: uploadedServerPaths.uploaded_file_count || 0,
+    reference_genome: (form.reference_genome || '').trim() || DEFAULT_FORM.reference_genome,
+    reference_genome_path: resolvePath(
+      uploadedServerPaths.reference_genome_path,
+      DEFAULT_FORM.reference_genome
+    ),
+    genome_gff: (form.genome_gff || '').trim() || DEFAULT_FORM.genome_gff,
+    genome_gff_path: resolvePath(uploadedServerPaths.genome_gff_path, DEFAULT_FORM.genome_gff),
+    function_annotation: (form.function_annotation || '').trim() || DEFAULT_FORM.function_annotation,
+    annotation_path: resolvePath(
+      uploadedServerPaths.annotation_path,
+      DEFAULT_FORM.function_annotation,
+      { optional: true }
+    ),
+    transcriptome_result_path: resolvePath(
+      uploadedServerPaths.transcriptome_result_path,
+      DEFAULT_FORM.transcriptome_result_path,
+      { optional: true }
+    ),
+    rnaseq_reads: (form.rnaseq_reads || '').trim() || DEFAULT_FORM.rnaseq_reads,
+    rnaseq_read_paths:
+      uploadedServerPaths.rnaseq_read_paths.length > 0
+        ? uploadedServerPaths.rnaseq_read_paths
+        : [],
+    sample_map: (form.sample_map || '').trim() || DEFAULT_FORM.sample_map,
+    sample_map_path: resolvePath(uploadedServerPaths.sample_map_path, DEFAULT_FORM.sample_map),
+    usage_doc: '',
+    metabolome_tsv: (form.metabolome_tsv || '').trim() || DEFAULT_FORM.metabolome_tsv,
+    metabolome_path: resolvePath(uploadedServerPaths.metabolome_path, DEFAULT_FORM.metabolome_tsv),
+    literature_evidence_path: resolvePath(
+      uploadedServerPaths.literature_evidence_path,
+      DEFAULT_FORM.literature_evidence_path,
+      { optional: true }
+    )
+  }
+}
 
 // 这个函数在点击提交后首先被调用。
 // 输入是当前表单；输出是缺失字段提示或 null。
@@ -1108,7 +1150,7 @@ const downloadSignificantDeg = () => {
 }
 
 const downloadMetabolome = () => {
-  const content = ['compound\tannotation', 'flavonoid_background\tmetabolome_raw_3372.tsv'].join(
+  const content = ['compound\tannotation', 'trait_related_metabolite\tmetabolome_raw_3372.tsv'].join(
     '\n'
   )
   downloadTsv('metabolome_raw_3372.tsv', content)
@@ -1532,6 +1574,19 @@ onMounted(async () => {
     flex: 1 1 auto;
     min-width: 0;
   }
+}
+
+.file-output-row {
+  padding: 10px 12px;
+  border: 1px dashed var(--gray-200);
+  border-radius: 12px;
+  background: var(--gray-0);
+}
+
+.file-output-note {
+  color: var(--gray-700);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .hidden-file-input {

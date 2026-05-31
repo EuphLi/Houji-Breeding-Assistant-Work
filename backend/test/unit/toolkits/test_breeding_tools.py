@@ -11,11 +11,15 @@ from __future__ import annotations
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 from yuxi.agents.toolkits import get_all_tool_instances
 from yuxi.agents.toolkits.breeding.tools import (
     TARGET_GENE,
+    _check_pipeline_dependencies,
+    _run_transcriptome_deg_impl,
+    _run_transcriptome_pipeline,
     _guard_advice,
     breeding_advice_generate,
     breeding_literature_evidence,
@@ -164,6 +168,349 @@ def test_transcriptome_deg_run_pipeline_false_reads_existing_result(tmp_path: Pa
     assert result["status"] == "completed"
     assert result["target_gene_found"] is True
     assert Path(result["significant_de_genes_path"]).exists()
+
+
+def test_transcriptome_deg_writes_run_log_when_pipeline_script_missing(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "uploaded_case"
+    (data_dir / "fq").mkdir(parents=True)
+    (data_dir / "fq" / "sample1.fq.gz").write_bytes(b"fake-fastq")
+    (data_dir / "genome.fa").write_text(">chr1\nATGC\n", encoding="utf-8")
+    (data_dir / "genome.gff").write_text("chr1\tsrc\tgene\t1\t10\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (data_dir / "sampleName_clientId.txt").write_text("sample1\tgroupA\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (None, None),
+    )
+
+    result = _run_transcriptome_deg_impl(
+        data_dir=str(data_dir),
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+        out_dir=str(data_dir / "transcriptome_deg"),
+        threads=4,
+        run_pipeline=True,
+    )
+
+    run_log = data_dir / "transcriptome_deg" / "run.log"
+    assert run_log.exists()
+    log_text = run_log.read_text(encoding="utf-8")
+    assert "resolved_pipeline_script_path:" in log_text
+    assert result["status"] == "error"
+    assert result["transcriptome_pipeline_status"] == "failed"
+    assert result["pipeline_log_path"] == str(run_log)
+    assert result["missing_inputs"] == []
+
+
+def test_transcriptome_deg_writes_run_log_when_genome_gff_missing(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "uploaded_case"
+    (data_dir / "fq").mkdir(parents=True)
+    (data_dir / "fq" / "sample1.fq.gz").write_bytes(b"fake-fastq")
+    (data_dir / "genome.fa").write_text(">chr1\nATGC\n", encoding="utf-8")
+    (data_dir / "sampleName_clientId.txt").write_text("sample1\tgroupA\n", encoding="utf-8")
+    script = tmp_path / "run_smoke_de_pipeline.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (script, str(script)),
+    )
+
+    result = _run_transcriptome_deg_impl(
+        data_dir=str(data_dir),
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+        out_dir=str(data_dir / "transcriptome_deg"),
+        threads=4,
+        run_pipeline=True,
+    )
+
+    run_log = data_dir / "transcriptome_deg" / "run.log"
+    assert run_log.exists()
+    assert "genome.gff" in run_log.read_text(encoding="utf-8")
+    assert result["status"] == "error"
+    assert result["transcriptome_pipeline_status"] == "not_enough_inputs"
+    assert any(item.endswith("genome.gff") for item in result["missing_inputs"])
+
+
+def test_transcriptome_deg_reports_completed_output_in_upload_root(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "uploaded_case"
+    (data_dir / "fq").mkdir(parents=True)
+    (data_dir / "fq" / "sample1.fq.gz").write_bytes(b"fake-fastq")
+    (data_dir / "genome.fa").write_text(">chr1\nATGC\n", encoding="utf-8")
+    (data_dir / "genome.gff").write_text("chr1\tsrc\tgene\t1\t10\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (data_dir / "sampleName_clientId.txt").write_text("sample1\tgroupA\n", encoding="utf-8")
+    script = tmp_path / "run_smoke_de_pipeline.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (script, str(script)),
+    )
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._check_pipeline_dependencies",
+        lambda **kwargs: {
+            "runner": "",
+            "mode": "current_path",
+            "checks": {},
+            "r_package_checks": {},
+            "missing_tools": [],
+            "missing_r_packages": [],
+        },
+    )
+
+    def fake_pipeline(*args, **kwargs):
+        out_dir = args[1]
+        deg_dir = out_dir / "de_pipeline_out" / "04_de"
+        deg_dir.mkdir(parents=True, exist_ok=True)
+        (deg_dir / "significant_de_genes.tsv").write_text(
+            "gene_id\tlogFC\tpvalue\tpadj\nGeneA\t1.0\t0.01\t0.02\n",
+            encoding="utf-8",
+        )
+        return {
+            "attempted": True,
+            "returncode": 0,
+            "command": ["bash", str(script)],
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "error": "",
+            "resolved_script_path": str(script),
+        }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._run_transcriptome_pipeline",
+        fake_pipeline,
+    )
+
+    result = _run_transcriptome_deg_impl(
+        data_dir=str(data_dir),
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+        out_dir=str(data_dir / "transcriptome_deg"),
+        threads=4,
+        run_pipeline=True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["transcriptome_pipeline_status"] == "completed"
+    assert Path(result["significant_de_genes_path"]).exists()
+    assert result["significant_de_genes_path"] == str(data_dir / "transcriptome_deg" / "significant_de_genes.tsv")
+
+
+def test_pipeline_dependency_checks_use_current_path_when_runner_unset(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TRANSCRIPTOME_PIPELINE_RUNNER", raising=False)
+    seen_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        seen_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    diagnostics = _check_pipeline_dependencies(data_dir=tmp_path)
+
+    assert diagnostics["mode"] == "current_path"
+    assert diagnostics["runner"] == ""
+    assert seen_commands[0] == ["hisat2-build", "--version"]
+    assert all(command[0] != "micromamba" for command in seen_commands)
+
+
+def test_pipeline_dependency_checks_use_configured_runner(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "micromamba run -n rnaseq_deg")
+    seen_commands: list[list[str]] = []
+    monkeypatch.setattr("shutil.which", lambda name: f"/home/test/.local/bin/{name}" if name == "micromamba" else None)
+
+    def fake_run(command, **kwargs):
+        assert isinstance(command, list)
+        seen_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    diagnostics = _check_pipeline_dependencies(data_dir=tmp_path)
+
+    assert diagnostics["mode"] == "runner"
+    assert diagnostics["runner"] == "micromamba run -n rnaseq_deg"
+    assert seen_commands[0][:4] == ["/home/test/.local/bin/micromamba", "run", "-n", "rnaseq_deg"]
+    assert "Rscript" in seen_commands[-1]
+    assert all("||" not in command for command in seen_commands)
+    assert diagnostics["checks"]["hisat2"]["command_list"] == [
+        "/home/test/.local/bin/micromamba",
+        "run",
+        "-n",
+        "rnaseq_deg",
+        "hisat2",
+        "--version",
+    ]
+    assert diagnostics["runner_info"]["resolved_executable"] == "/home/test/.local/bin/micromamba"
+
+
+def test_pipeline_dependency_checks_accept_absolute_runner_path(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "/tmp/fake-micromamba run -n rnaseq_deg")
+    seen_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        seen_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    diagnostics = _check_pipeline_dependencies(data_dir=tmp_path)
+
+    assert seen_commands[0][:4] == ["/tmp/fake-micromamba", "run", "-n", "rnaseq_deg"]
+    assert diagnostics["runner_info"]["resolved_args"][:4] == ["/tmp/fake-micromamba", "run", "-n", "rnaseq_deg"]
+
+
+def test_pipeline_dependency_checks_capture_runner_executable_not_found(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "micromamba run -n rnaseq_deg")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+
+    diagnostics = _check_pipeline_dependencies(data_dir=tmp_path)
+
+    assert diagnostics["missing_tools"] == ["hisat2-build", "hisat2", "samtools", "featureCounts", "Rscript"]
+    assert diagnostics["checks"]["hisat2"]["runner_executable_not_found"] == "micromamba"
+    assert "FileNotFoundError" in diagnostics["checks"]["hisat2"]["exception"]
+    assert diagnostics["checks"]["hisat2"]["runner_resolution_attempts"]
+
+
+def test_pipeline_r_package_checks_use_same_runner(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "micromamba run -n rnaseq_deg")
+    seen_commands: list[list[str]] = []
+    monkeypatch.setattr("shutil.which", lambda name: f"/home/test/.local/bin/{name}" if name == "micromamba" else None)
+
+    def fake_run(command, **kwargs):
+        seen_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    diagnostics = _check_pipeline_dependencies(data_dir=tmp_path)
+
+    rscript_commands = [command for command in seen_commands if "Rscript" in command]
+    assert rscript_commands
+    assert all(
+        command[:4] == ["/home/test/.local/bin/micromamba", "run", "-n", "rnaseq_deg"]
+        for command in rscript_commands
+    )
+    assert diagnostics["missing_r_packages"] == []
+
+
+def test_transcriptome_pipeline_executes_with_runner_prefix(tmp_path: Path, monkeypatch):
+    script = tmp_path / "run_smoke_de_pipeline.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    run_log = tmp_path / "run.log"
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "micromamba run -n rnaseq_deg")
+    monkeypatch.setattr("shutil.which", lambda name: f"/home/test/.local/bin/{name}" if name == "micromamba" else None)
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (script, str(script)),
+    )
+    seen_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        seen_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="pipeline ok\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _run_transcriptome_pipeline(
+        tmp_path,
+        tmp_path / "transcriptome_deg",
+        4,
+        run_log,
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+    )
+
+    assert result["runner"] == "micromamba run -n rnaseq_deg"
+    assert seen_commands[0][:4] == ["/home/test/.local/bin/micromamba", "run", "-n", "rnaseq_deg"]
+    assert seen_commands[0][4:] == [
+        "bash",
+        str(script),
+        "--fa",
+        "genome.fa",
+        "--gff",
+        "genome.gff",
+        "--fq-dir",
+        "fq",
+        "--sample-map",
+        "sampleName_clientId.txt",
+        "--outdir",
+        str(tmp_path / "transcriptome_deg" / "de_pipeline_out"),
+        "--threads",
+        "4",
+    ]
+
+
+def test_transcriptome_deg_reports_missing_runner_dependencies(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "uploaded_case"
+    (data_dir / "fq").mkdir(parents=True)
+    (data_dir / "fq" / "sample1.fq.gz").write_bytes(b"fake-fastq")
+    (data_dir / "genome.fa").write_text(">chr1\nATGC\n", encoding="utf-8")
+    (data_dir / "genome.gff").write_text("chr1\tsrc\tgene\t1\t10\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (data_dir / "sampleName_clientId.txt").write_text("sample1\tgroupA\n", encoding="utf-8")
+    script = tmp_path / "run_smoke_de_pipeline.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setenv("TRANSCRIPTOME_PIPELINE_RUNNER", "micromamba run -n rnaseq_deg")
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (script, str(script)),
+    )
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._check_pipeline_dependencies",
+        lambda **kwargs: {
+            "runner": "micromamba run -n rnaseq_deg",
+            "mode": "runner",
+            "checks": {
+                "hisat2": {
+                    "tool": "hisat2",
+                    "command": ["micromamba", "run", "-n", "rnaseq_deg", "hisat2", "--version"],
+                    "command_display": "micromamba run -n rnaseq_deg hisat2 --version",
+                    "available": False,
+                    "returncode": 1,
+                    "stdout_tail": "",
+                    "stderr_tail": "missing",
+                    "exception": "",
+                    "runner_executable_not_found": "",
+                }
+            },
+            "r_package_checks": {},
+            "missing_tools": ["hisat2", "samtools"],
+            "missing_r_packages": [],
+        },
+    )
+
+    result = _run_transcriptome_deg_impl(
+        data_dir=str(data_dir),
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+        out_dir=str(data_dir / "transcriptome_deg"),
+        threads=4,
+        run_pipeline=True,
+    )
+
+    run_log = data_dir / "transcriptome_deg" / "run.log"
+    log_text = run_log.read_text(encoding="utf-8")
+    assert result["transcriptome_pipeline_status"] == "failed"
+    assert result["transcriptome_pipeline_decision_reason"] == "pipeline_dependencies_missing"
+    assert result["transcriptome_pipeline_runner"] == "micromamba run -n rnaseq_deg"
+    assert "transcriptome_pipeline_runner: micromamba run -n rnaseq_deg" in log_text
+    assert "missing_tools: hisat2, samtools" in log_text
+    assert "dependency_check_results:" in log_text
+    assert "  - tool: hisat2" in log_text
+    assert "command: micromamba run -n rnaseq_deg hisat2 --version" in log_text
 
 
 def test_metabolome_prepare_detects_flavonoid_keywords(tmp_path: Path):

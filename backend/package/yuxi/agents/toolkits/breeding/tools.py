@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -76,6 +78,7 @@ ACCEPTED_LITERATURE_CURATION_STATUSES = {"verified", "curated", "accepted"}
 
 # 转录组流程依赖的固定生信脚本（调用这些开源生信软件）
 PIPELINE_DEPENDENCIES = ("hisat2-build", "hisat2", "samtools", "featureCounts", "Rscript")
+PIPELINE_R_PACKAGES = ("limma", "optparse", "data.table")
 
 
 """输入合同层"""
@@ -196,9 +199,13 @@ def _required_smoke_files(data_dir: Path) -> tuple[dict[str, Path], list[str]]:
 
     # 先去 data_dir/fq/下面找所有的*.fq.gz文件
     fq_dir = data_dir / "fq"
-    fastqs = sorted(fq_dir.glob("*.fq.gz")) if fq_dir.exists() else []
+    fastqs = []
+    if fq_dir.exists():
+        for pattern in ("*.fq.gz", "*.fastq.gz", "*.fq", "*.fastq"):
+            fastqs.extend(sorted(fq_dir.glob(pattern)))
     if not fastqs:
-        fastqs = sorted(data_dir.glob("*.fq.gz"))  # 没找到则退一步去根目录 data_dir 寻找
+        for pattern in ("*.fq.gz", "*.fastq.gz", "*.fq", "*.fastq"):
+            fastqs.extend(sorted(data_dir.glob(pattern)))  # 没找到则退一步去根目录 data_dir 寻找
     if not fastqs:
         missing.append(str(fq_dir / "*.fq.gz"))  # 若还没找到就认为缺少 RNA-seq reads
 
@@ -415,6 +422,31 @@ def _copy_significant_de_genes(significant_de_path: Path | None, out_path: Path)
     return copied
 
 
+def _copy_optional_pipeline_table(
+    *,
+    filename: str,
+    data_dir: Path,
+    out_dir: Path,
+) -> Path | None:
+    candidates: list[Path] = [data_dir / filename, out_dir / filename]
+    for base in (data_dir, out_dir):
+        if base.exists():
+            candidates.extend(sorted(base.rglob(filename)))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists() and resolved.is_file():
+            copied = out_dir / filename
+            if copied.resolve() != resolved:
+                shutil.copy2(resolved, copied)
+            return copied
+    return None
+
+
 def _normalize_literature_evidence_level(raw_level: str) -> str:
     # 旧逻辑的问题：
     # TSV 中的 evidence_level 可能混用 crop_trait_background、pathway_background、gene_specific 等内部写法。
@@ -521,25 +553,232 @@ def _load_json_if_present(path_value: str) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-# 检查外部生信软件是否安装  用于在真正运行 run_smoke_de_pipeline.sh 前提前检查环境，避免脚本跑到一半才报错
-def _check_missing_pipeline_tools() -> list[str]:
-    # 这个函数在真正执行转录组固定脚本前被调用。
-    # 输入为空；输出是当前环境缺失的底层开源生信软件名列表。
-    # PIPELINE_DEPENDENCIES 目前是 ("hisat2-build", "hisat2", "samtools", "featureCounts", "Rscript")
+def _transcriptome_pipeline_runner() -> str:
+    return str(os.environ.get("TRANSCRIPTOME_PIPELINE_RUNNER") or "").strip()
 
-    # 遍历所有的依赖，如果系统找不到这个命令，就把它加入到缺失列表
-    return [name for name in PIPELINE_DEPENDENCIES if shutil.which(name) is None]
+
+def _resolve_pipeline_runner() -> dict[str, Any]:
+    runner = _transcriptome_pipeline_runner()
+    if not runner:
+        return {
+            "raw": "",
+            "args": [],
+            "resolved_args": [],
+            "resolved_executable": "",
+            "resolution_attempts": [],
+            "executable_not_found": "",
+        }
+
+    runner_args = shlex.split(runner)
+    if not runner_args:
+        return {
+            "raw": runner,
+            "args": [],
+            "resolved_args": [],
+            "resolved_executable": "",
+            "resolution_attempts": [],
+            "executable_not_found": "",
+        }
+
+    executable = runner_args[0]
+    resolution_attempts: list[str] = []
+    resolved_executable = ""
+    executable_path = Path(executable).expanduser()
+    if executable_path.is_absolute():
+        resolution_attempts.append(str(executable_path))
+        resolved_executable = str(executable_path)
+    else:
+        which_result = shutil.which(executable)
+        if which_result:
+            resolution_attempts.append(which_result)
+            resolved_executable = which_result
+        else:
+            home = Path.home()
+            for candidate in [
+                home / ".local" / "bin" / executable,
+                home / "micromamba" / "bin" / executable,
+                Path("/home/li/.local/bin") / executable,
+                Path("/home/li/micromamba/bin") / executable,
+            ]:
+                candidate_text = str(candidate.expanduser())
+                resolution_attempts.append(candidate_text)
+                if candidate.exists():
+                    resolved_executable = candidate_text
+                    break
+
+    resolved_args = list(runner_args)
+    if resolved_executable:
+        resolved_args[0] = resolved_executable
+
+    return {
+        "raw": runner,
+        "args": runner_args,
+        "resolved_args": resolved_args,
+        "resolved_executable": resolved_executable,
+        "resolution_attempts": resolution_attempts,
+        "executable_not_found": executable if runner_args and not resolved_executable else "",
+    }
+
+
+def _with_pipeline_runner(command: list[str], *, runner_info: dict[str, Any] | None = None) -> list[str]:
+    info = runner_info or _resolve_pipeline_runner()
+    resolved_args = list(info.get("resolved_args") or [])
+    if not resolved_args:
+        return command
+    return [*resolved_args, *command]
+
+
+def _tail_text(text: str, *, max_chars: int = 2000) -> str:
+    return str(text or "")[-max_chars:]
+
+
+def _run_dependency_probe(
+    tool: str,
+    command: list[str],
+    *,
+    cwd: Path,
+    runner_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    runner_info = runner_info or _resolve_pipeline_runner()
+    full_command = _with_pipeline_runner(command, runner_info=runner_info)
+    result = {
+        "tool": tool,
+        "command_list": full_command,
+        "command_display": " ".join(full_command),
+        "command": full_command,
+        "runner_raw": runner_info.get("raw") or "",
+        "resolved_pipeline_runner_args": list(runner_info.get("resolved_args") or []),
+        "resolved_pipeline_runner_executable": runner_info.get("resolved_executable") or "",
+        "runner_resolution_attempts": list(runner_info.get("resolution_attempts") or []),
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "exception": "",
+        "runner_executable_not_found": runner_info.get("executable_not_found") or "",
+        "available": False,
+        "ok": False,
+    }
+    if runner_info.get("executable_not_found"):
+        result["stderr_tail"] = f"Runner executable not found: {runner_info['executable_not_found']}"
+        result["exception"] = f"FileNotFoundError(2, 'No such file or directory: {runner_info['executable_not_found']}')"
+        return result
+    try:
+        completed = subprocess.run(
+            full_command,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        result["returncode"] = completed.returncode
+        result["stdout_tail"] = _tail_text(completed.stdout)
+        result["stderr_tail"] = _tail_text(completed.stderr)
+        result["available"] = completed.returncode == 0
+        result["ok"] = result["available"]
+    except FileNotFoundError as exc:
+        result["exception"] = repr(exc)
+        result["stderr_tail"] = str(exc)
+        result["runner_executable_not_found"] = full_command[0] if full_command else ""
+    except Exception as exc:  # noqa: BLE001
+        result["exception"] = repr(exc)
+        result["stderr_tail"] = str(exc)
+    return result
+
+
+def _check_pipeline_dependencies(*, data_dir: Path) -> dict[str, Any]:
+    runner_info = _resolve_pipeline_runner()
+    dependency_commands = {
+        "hisat2-build": ["hisat2-build", "--version"],
+        "hisat2": ["hisat2", "--version"],
+        "samtools": ["samtools", "--version"],
+        "featureCounts": ["featureCounts", "-v"],
+        "Rscript": ["Rscript", "--version"],
+    }
+    dependency_checks = {
+        name: _run_dependency_probe(name, command, cwd=data_dir, runner_info=runner_info)
+        for name, command in dependency_commands.items()
+    }
+    missing_tools = [name for name, check in dependency_checks.items() if not check["available"]]
+
+    r_package_checks: dict[str, dict[str, Any]] = {}
+    missing_r_packages: list[str] = []
+    if "Rscript" not in missing_tools:
+        for package_name in PIPELINE_R_PACKAGES:
+            check = _run_dependency_probe(
+                f"Rpackage:{package_name}",
+                ["Rscript", "-e", f'q(status=if (requireNamespace("{package_name}", quietly=TRUE)) 0 else 1)'],
+                cwd=data_dir,
+                runner_info=runner_info,
+            )
+            r_package_checks[package_name] = check
+            if not check["available"]:
+                missing_r_packages.append(package_name)
+
+    return {
+        "runner": runner_info.get("raw") or "",
+        "mode": "runner" if runner_info.get("raw") else "current_path",
+        "runner_info": runner_info,
+        "checks": dependency_checks,
+        "missing_tools": missing_tools,
+        "r_package_checks": r_package_checks,
+        "missing_r_packages": missing_r_packages,
+    }
+
+
+def _resolve_transcriptome_pipeline_script(data_dir: Path) -> tuple[Path | None, str | None]:
+    local_tool_dir = Path(__file__).resolve().parent
+    candidates = [
+        data_dir / REQUIRED_FILES["pipeline_script"],
+        local_tool_dir / REQUIRED_FILES["pipeline_script"],
+        local_tool_dir / "scripts" / REQUIRED_FILES["pipeline_script"],
+    ]
+    default_root = Path(DEFAULT_DATA_DIR).expanduser()
+    candidates.append(default_root / REQUIRED_FILES["pipeline_script"])
+    if default_root.exists():
+        candidates.extend(sorted(default_root.rglob(REQUIRED_FILES["pipeline_script"])))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists() and resolved.is_file():
+            return resolved, str(resolved)
+    return None, None
 
 
 """
 固定流程执行层：目前只有转录组接入了固定的生信分析脚本
 """
-def _run_transcriptome_pipeline(data_dir: Path, out_dir: Path, threads: int, run_log: Path) -> dict[str, Any]:
+def _run_transcriptome_pipeline(
+    data_dir: Path,
+    out_dir: Path,
+    threads: int,
+    run_log: Path,
+    *,
+    fq_dir: str,
+    sample_map: str,
+    genome_fa: str,
+    genome_gff: str,
+) -> dict[str, Any]:
     # 真正的转录组执行不是 YuXi 原生能力，而是调用学长给定的固定脚本 run_smoke_de_pipeline.sh 。
     # 该脚本底层依赖 hisat2、samtools、featureCounts、Rscript 等开源生信软件。
 
     # 找到脚本路径
-    script = data_dir / REQUIRED_FILES["pipeline_script"] # "run_smoke_de_pipeline.sh"
+    script, resolved_script_path = _resolve_transcriptome_pipeline_script(data_dir)
+    if script is None:
+        run_log.write_text("Pipeline script not found: run_smoke_de_pipeline.sh\n", encoding="utf-8")
+        return {
+            "attempted": False,
+            "returncode": None,
+            "command": [],
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "error": "pipeline_script_missing",
+            "resolved_script_path": "",
+        }
     # 设置转录组输出目录
     de_out_dir = out_dir / "de_pipeline_out"
     # 组装命令 本质是拼接 Linux 命令  subprocess.run() 用列表形式相比于字符串执行时更安全
@@ -547,31 +786,44 @@ def _run_transcriptome_pipeline(data_dir: Path, out_dir: Path, threads: int, run
         "bash",
         str(script),
         "--fa",
-        "genome.fa",
+        genome_fa,
         "--gff",
-        "genome.gff",
+        genome_gff,
         "--fq-dir",
-        "fq",
+        fq_dir,
         "--sample-map",
-        "sampleName_clientId.txt",
+        sample_map,
         "--outdir",
         str(de_out_dir),
         "--threads",
         str(threads),
     ]
+    runner_info = _resolve_pipeline_runner()
+    final_command = _with_pipeline_runner(command, runner_info=runner_info)
     # 初始化结果字典，函数返回给上层的执行结果摘要
     result: dict[str, Any] = {
         "attempted": True,  # 是否尝试执行脚本
         "returncode": None,  # 脚本返回码  正常执行为0
-        "command": command,  # 实际执行命令
+        "command": final_command,  # 实际执行命令
         "stdout_tail": "",  # 标准输出最后 4000 个字符
         "stderr_tail": "",  # 错误输出最后 4000 个字符
         "error": "",  # python 调用阶段的异常
+        "resolved_script_path": resolved_script_path or "",
+        "runner": runner_info.get("raw") or "",
+        "resolved_pipeline_runner_args": list(runner_info.get("resolved_args") or []),
+        "resolved_pipeline_runner_executable": runner_info.get("resolved_executable") or "",
+        "runner_resolution_attempts": list(runner_info.get("resolution_attempts") or []),
+        "runner_executable_not_found": runner_info.get("executable_not_found") or "",
     }
+    if runner_info.get("executable_not_found"):
+        result["attempted"] = False
+        result["error"] = "pipeline_runner_executable_not_found"
+        result["stderr_tail"] = f"Runner executable not found: {runner_info['executable_not_found']}"
+        return result
     # 真正执行脚本
     try:
         completed = subprocess.run(
-            command,  # 要执行的命令列表
+            final_command,  # 要执行的命令列表
             cwd=str(data_dir),  # 在数据目录下执行脚本，使脚本找到传来的data_dir相对路径下的文件
             text=True,  # 输出按字符串处理而不是字节
             capture_output=True,  # 捕获 stdout 和 stderr
@@ -585,7 +837,7 @@ def _run_transcriptome_pipeline(data_dir: Path, out_dir: Path, threads: int, run
         # 编写运行日志，生成一个 run.log
         run_log.write_text(
             "\n".join([
-                f"command: {' '.join(command)}",
+                f"command: {' '.join(final_command)}",
                 f"cwd: {data_dir}",
                 f"returncode: {completed.returncode}",
                 "",
@@ -922,62 +1174,223 @@ def _run_transcriptome_deg_impl(
     # - 真正的“信息打捞”由固定脚本和 hisat2/samtools/featureCounts/Rscript 完成；
     # - LLM 不能替代这条固定生信流程。
 
-    # 检查目录
-    data_path, error = _ensure_data_dir(data_dir)
-    if error:
-        return error
     out_path, out_error = _ensure_out_dir(out_dir)
     if out_error:
         return {"status": "error", "error": out_error, "artifacts": []}
-    # 拼接输入参考文件路径
+    run_log = out_path / "run.log"
+    # 检查目录
+    data_path, error = _ensure_data_dir(data_dir)
+    if error:
+        run_log.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now(timezone.utc).isoformat()}",
+                    f"data_dir: {Path(data_dir).expanduser()}",
+                    "final_status: error",
+                    f"error: {error['error']}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            **error,
+            "pipeline_log_path": str(run_log),
+            "artifacts": [str(run_log)],
+        }
+
     fq_path = data_path / fq_dir
     sample_map_path = data_path / sample_map
     genome_fa_path = data_path / genome_fa
     genome_gff_path = data_path / genome_gff
-    script_path = data_path / REQUIRED_FILES["pipeline_script"]
+    script_path, resolved_script_path = _resolve_transcriptome_pipeline_script(data_path)
 
-    # 检查输入文件
-    missing_inputs = [str(path) for path in (sample_map_path, genome_fa_path, genome_gff_path, script_path) if not path.exists()]
-    fastq_files = sorted(fq_path.glob("*.fq.gz")) if fq_path.exists() else []
+    missing_inputs = [str(path) for path in (sample_map_path, genome_fa_path, genome_gff_path) if not path.exists()]
+    fastq_files: list[Path] = []
+    if fq_path.exists():
+        for pattern in ("*.fq.gz", "*.fastq.gz", "*.fq", "*.fastq"):
+            fastq_files.extend(sorted(fq_path.glob(pattern)))
     if not fastq_files:
-        missing_inputs.append(str(fq_path / "*.fq.gz"))  # 如果没有 .fq.gz，就认为缺 RNA-seq reads
+        missing_inputs.append(str(fq_path / "*.fq.gz"))
 
-    run_log = out_path / "run.log"
-    pipeline_result = {"attempted": False, "returncode": None, "stdout_tail": "", "stderr_tail": "", "error": ""}
+    pipeline_result = {
+        "attempted": False,
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "error": "",
+        "resolved_script_path": resolved_script_path or "",
+        "command": [],
+    }
     missing_tools: list[str] = []
+    missing_r_packages: list[str] = []
+    dependency_diagnostics: dict[str, Any] = {
+        "runner": _transcriptome_pipeline_runner(),
+        "mode": "runner" if _transcriptome_pipeline_runner() else "current_path",
+        "runner_info": _resolve_pipeline_runner(),
+        "checks": {},
+        "r_package_checks": {},
+    }
+    transcriptome_pipeline_status = "not_enough_inputs"
+    transcriptome_pipeline_decision_reason = "missing_required_inputs" if missing_inputs else ""
+
+    def _write_pipeline_log(final_status: str) -> None:
+        if (dependency_diagnostics.get("runner_info") or {}).get("executable_not_found"):
+            next_step_hint = (
+                'Use an absolute micromamba path, e.g. export TRANSCRIPTOME_PIPELINE_RUNNER="$(command -v micromamba) run -n rnaseq_deg"'
+            )
+        elif missing_tools or missing_r_packages:
+            next_step_hint = (
+                "Install required bioinformatics tools in the configured runner environment, "
+                "for example rnaseq_deg, or set TRANSCRIPTOME_PIPELINE_RUNNER to a valid environment."
+            )
+        else:
+            next_step_hint = "Review final_command, stdout/stderr, and the fixed pipeline script output."
+        dependency_check_commands = [
+            check.get("command_display") or " ".join(check.get("command") or [])
+            for check in dependency_diagnostics.get("checks", {}).values()
+        ]
+        dependency_check_results_lines: list[str] = []
+        for check in dependency_diagnostics.get("checks", {}).values():
+            dependency_check_results_lines.extend(
+                [
+                    f"  - tool: {check.get('tool')}",
+                    f"    command: {check.get('command_display') or ''}",
+                    f"    returncode: {check.get('returncode')}",
+                    f"    available: {str(bool(check.get('available'))).lower()}",
+                    f"    stdout_tail: {check.get('stdout_tail') or ''}",
+                    f"    stderr_tail: {check.get('stderr_tail') or ''}",
+                    f"    exception: {check.get('exception') or ''}",
+                    f"    runner_executable_not_found: {check.get('runner_executable_not_found') or ''}",
+                ]
+            )
+        if dependency_diagnostics.get("r_package_checks"):
+            for package_name, check in dependency_diagnostics["r_package_checks"].items():
+                dependency_check_commands.append(
+                    check.get("command_display") or " ".join(check.get("command") or [])
+                )
+                dependency_check_results_lines.extend(
+                    [
+                        f"  - tool: Rpackage:{package_name}",
+                        f"    command: {check.get('command_display') or ''}",
+                        f"    returncode: {check.get('returncode')}",
+                        f"    available: {str(bool(check.get('available'))).lower()}",
+                        f"    stdout_tail: {check.get('stdout_tail') or ''}",
+                        f"    stderr_tail: {check.get('stderr_tail') or ''}",
+                        f"    exception: {check.get('exception') or ''}",
+                        f"    runner_executable_not_found: {check.get('runner_executable_not_found') or ''}",
+                    ]
+                )
+        run_log.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now(timezone.utc).isoformat()}",
+                    f"data_dir: {data_path}",
+                    f"upload_root: {data_path}",
+                    f"discovered_fastq_count: {len(fastq_files)}",
+                    f"discovered_sample_map_path: {sample_map_path}",
+                    f"discovered_reference_genome_path: {genome_fa_path}",
+                    f"discovered_genome_gff_path: {genome_gff_path}",
+                    f"transcriptome_pipeline_runner: {dependency_diagnostics.get('runner') or ''}",
+                    f"resolved_pipeline_runner_args: {json.dumps((dependency_diagnostics.get('runner_info') or {}).get('resolved_args') or [], ensure_ascii=False)}",
+                    f"resolved_pipeline_runner_executable: {(dependency_diagnostics.get('runner_info') or {}).get('resolved_executable') or ''}",
+                    f"runner_resolution_attempts: {json.dumps((dependency_diagnostics.get('runner_info') or {}).get('resolution_attempts') or [], ensure_ascii=False)}",
+                    f"runner_executable_not_found: {(dependency_diagnostics.get('runner_info') or {}).get('executable_not_found') or ''}",
+                    f"dependency_check_mode: {dependency_diagnostics.get('mode') or 'current_path'}",
+                    f"dependency_check_commands: {json.dumps(dependency_check_commands, ensure_ascii=False)}",
+                    f"resolved_pipeline_script_path: {resolved_script_path or ''}",
+                    f"missing_inputs: {', '.join(missing_inputs)}",
+                    f"missing_tools: {', '.join(missing_tools)}",
+                    f"missing_r_packages: {', '.join(missing_r_packages)}",
+                    f"command: {' '.join(pipeline_result.get('command') or [])}",
+                    f"final_command: {' '.join(pipeline_result.get('command') or [])}",
+                    f"returncode: {pipeline_result.get('returncode')}",
+                    f"transcriptome_pipeline_status: {transcriptome_pipeline_status}",
+                    f"transcriptome_pipeline_decision_reason: {transcriptome_pipeline_decision_reason}",
+                    f"final_status: {final_status}",
+                    f"next_step_hint: {next_step_hint}",
+                    "",
+                    "=== stdout_tail ===",
+                    str(pipeline_result.get("stdout_tail") or ""),
+                    "",
+                    "=== stderr_tail ===",
+                    str(pipeline_result.get("stderr_tail") or ""),
+                    "",
+                    "=== pipeline_error ===",
+                    str(pipeline_result.get("error") or ""),
+                    "",
+                    "dependency_check_results:",
+                    *dependency_check_results_lines,
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     # 运行固定脚本判断
     if run_pipeline and not missing_inputs:
-        missing_tools = _check_missing_pipeline_tools()  # 检查外部软件
-        # 缺少工具，就写日志不跑脚本
-        if missing_tools:
-            run_log.write_text("Missing pipeline tools: " + ", ".join(missing_tools) + "\n", encoding="utf-8")
-        # 工具齐全，调用脚本
+        if script_path is None:
+            transcriptome_pipeline_status = "failed"
+            transcriptome_pipeline_decision_reason = "pipeline_script_not_found"
+            pipeline_result["error"] = "pipeline_script_missing"
         else:
-            pipeline_result = _run_transcriptome_pipeline(data_path, out_path, threads, run_log)
-    # 用户选择不重新跑脚本，只读取已有结果（因为重新跑转录组流程可能慢）
-    elif not run_log.exists():
-        run_log.write_text("run_pipeline=false; existing significant_de_genes.tsv was requested.\n", encoding="utf-8")
+            dependency_diagnostics = _check_pipeline_dependencies(data_dir=data_path)
+            missing_tools = list(dependency_diagnostics.get("missing_tools") or [])
+            missing_r_packages = list(dependency_diagnostics.get("missing_r_packages") or [])
+            if missing_tools or missing_r_packages:
+                transcriptome_pipeline_status = "failed"
+                transcriptome_pipeline_decision_reason = "pipeline_dependencies_missing"
+            else:
+                pipeline_result = _run_transcriptome_pipeline(
+                    data_path,
+                    out_path,
+                    threads,
+                    run_log,
+                    fq_dir=fq_dir,
+                    sample_map=sample_map,
+                    genome_fa=genome_fa,
+                    genome_gff=genome_gff,
+                )
+                resolved_script_path = str(
+                    pipeline_result.get("resolved_script_path") or resolved_script_path or ""
+                )
+                transcriptome_pipeline_status = (
+                    "completed" if pipeline_result.get("returncode") == 0 else "failed"
+                )
+                transcriptome_pipeline_decision_reason = "pipeline_executed"
+    elif not run_pipeline:
+        transcriptome_pipeline_status = "skipped_existing_deg_request"
+        transcriptome_pipeline_decision_reason = "run_pipeline_disabled"
 
     # 查找 DEG 文件
     preferred = out_path / "de_pipeline_out" / "04_de" / "significant_de_genes.tsv"
     significant_de_path = _find_significant_de_genes(data_path, out_path, preferred=preferred)
     # 复制 DEG 文件
     copied_de_path = _copy_significant_de_genes(significant_de_path, out_path)
+    copied_all_genes_path = _copy_optional_pipeline_table(
+        filename="all_genes.tsv",
+        data_dir=data_path,
+        out_dir=out_path,
+    )
     # 检查目标基因是否出现
     de_support = _inspect_de_support(copied_de_path or significant_de_path, TARGET_GENE)
 
     # 判断状态
-    if missing_inputs:  # 缺输入文件
+    if copied_de_path or significant_de_path:  # 找到DEG文件
+        status = "completed"
+        transcriptome_pipeline_status = "completed"
+    elif missing_inputs:  # 缺输入文件
         status = "error"
-    elif run_pipeline and missing_tools:  # 缺生信软件工具（hisat2/samtools等）
+    elif run_pipeline and script_path is None:
+        status = "error"
+    elif run_pipeline and (missing_tools or missing_r_packages):  # 缺生信软件工具（hisat2/samtools等）
         status = "error"
     elif run_pipeline and pipeline_result.get("returncode") not in {0, None}:  # 脚本返回非0
         status = "error"
-    elif copied_de_path or significant_de_path:  # 找到DEG文件
-        status = "completed"
     else:  # 其余情况
         status = "error"
+        if not transcriptome_pipeline_decision_reason:
+            transcriptome_pipeline_decision_reason = "deg_not_generated"
 
     # 写对应json日志
     manifest_path = out_path / "transcriptome_manifest.json"
@@ -985,35 +1398,56 @@ def _run_transcriptome_deg_impl(
         "tool": "breeding_transcriptome_deg",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
+        "transcriptome_pipeline_status": transcriptome_pipeline_status,
+        "transcriptome_pipeline_decision_reason": transcriptome_pipeline_decision_reason,
         "data_dir": str(data_path),
         "fq_dir": str(fq_path),
         "sample_map": str(sample_map_path),
         "genome_fa": str(genome_fa_path),
         "genome_gff": str(genome_gff_path),
+        "resolved_pipeline_script_path": resolved_script_path or "",
         "run_pipeline": run_pipeline,
         "threads": threads,
         "missing_inputs": missing_inputs,
         "missing_tools": missing_tools,
+        "missing_r_packages": missing_r_packages,
+        "transcriptome_pipeline_runner": dependency_diagnostics.get("runner") or "",
+        "dependency_check_mode": dependency_diagnostics.get("mode") or "current_path",
+        "dependency_diagnostics": dependency_diagnostics,
         "pipeline_result": pipeline_result,
         "significant_de_genes_path": str(copied_de_path or significant_de_path or ""),
+        "all_genes_path": str(copied_all_genes_path or ""),
         "target_gene_found": de_support["supports_target_gene"],
         "target_gene_matches": de_support["matches"],
     }
+    _write_pipeline_log(status)
     _write_json(manifest_path, manifest)
+    _write_json(out_path / "manifest.json", manifest)
 
-    artifacts = [str(manifest_path), str(run_log)]
+    artifacts = [str(manifest_path), str(out_path / "manifest.json"), str(run_log)]
     if copied_de_path or significant_de_path:
         artifacts.insert(0, str(copied_de_path or significant_de_path))
+    if copied_all_genes_path:
+        artifacts.insert(1, str(copied_all_genes_path))
 
     return {
         "status": status,
         "manifest": str(manifest_path),
         "significant_de_genes_path": str(copied_de_path or significant_de_path or ""),
+        "all_genes_path": str(copied_all_genes_path or ""),
         "target_gene_found": de_support["supports_target_gene"],
         "matches": de_support["matches"],
         "missing_inputs": missing_inputs,
         "missing_tools": missing_tools,
+        "missing_r_packages": missing_r_packages,
         "pipeline_result": pipeline_result,
+        "pipeline_log_path": str(run_log),
+        "transcriptome_pipeline_status": transcriptome_pipeline_status,
+        "transcriptome_pipeline_decision_reason": transcriptome_pipeline_decision_reason,
+        "resolved_pipeline_script_path": resolved_script_path or "",
+        "transcriptome_pipeline_runner": dependency_diagnostics.get("runner") or "",
+        "dependency_check_mode": dependency_diagnostics.get("mode") or "current_path",
+        "dependency_diagnostics": dependency_diagnostics,
         "artifacts": artifacts,
     }
 
