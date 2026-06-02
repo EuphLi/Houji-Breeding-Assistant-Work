@@ -37,8 +37,8 @@ def test_prepare_omics_evidence_pack_from_context_writes_json(
     )
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
-        "gene_id\tlogFC\tpvalue\tpadj\n"
-        "GeneA\t1.8\t0.003\t0.02\n",
+        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
+        "GeneA\t1.8\t0.003\t0.02\tchalcone--flavonone isomerase\n",
         encoding="utf-8",
     )
 
@@ -72,6 +72,7 @@ def test_prepare_omics_evidence_pack_from_context_writes_json(
     loaded = json.loads(output_path.read_text(encoding="utf-8"))
     assert loaded["task"]["trait"] == "抗旱"
     assert loaded["targets"]["genes"] == ["GeneA"]
+    assert loaded["evidence"]["transcriptome"][0]["annotation"] == "chalcone--flavonone isomerase"
 
 
 # 验证：旧 Tool 返回结果

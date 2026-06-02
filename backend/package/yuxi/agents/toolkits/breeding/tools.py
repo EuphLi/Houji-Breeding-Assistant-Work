@@ -21,12 +21,34 @@ from pydantic import BaseModel, Field
 
 from yuxi.agents.toolkits.registry import tool
 
-# FIXME 当前阶段：写死的是 smoke demo 的任务边界   或者是说目前的 tools 更准确地叫：谷子黄酮 smoke 任务专用 Tool
-# TODO 未来阶段：可以抽象成多性状、多作物、多任务配置 任意作物任意性状通用育种 Tool  但是需要学长继续提供固定的 tool 流程
+"""
+所属业务层次
+育种工具实现层 / Tool 注册或包装层 / 固定流程工具集合
+如果 omics_analysis.py 是“调度层”，那么 tools.py 就更接近“具体执行层”。
+它负责把 Python 里的工具调用转成真实命令或脚本执行。
+
+如果 omics_analysis.py 是 worker 调用的入口，那么 tools.py 可能承担两类职责之一：
+1. 注册或暴露 breeding 相关工具。2. 提供具体底层函数，例如转录组 DEG 工具。
+
+在数据流中的位置
+omics_analysis.py
+  ↓
+tools.py 中的具体实现函数
+
+也可能是：
+tool registry
+  ↓
+tools.py 暴露工具定义
+  ↓
+worker / Tool service 找到 omics_breeding_analysis_run
+"""
+
+# FIXME 已完成 当前阶段：写死的是 smoke demo 的任务边界   或者是说目前的 tools 更准确地叫：谷子黄酮 smoke 任务专用 Tool
+# TODO 已完成 未来阶段：可以抽象成多性状、多作物、多任务配置 任意作物任意性状通用育种 Tool  但是需要学长继续提供固定的 tool 流程
 
 DEFAULT_DATA_DIR = "/mnt/yuxi-breeding-data/smoke_test_minimal"
 DEFAULT_OUT_DIR = "/tmp/yuxi_runs/smoke_flavonoid_breeding_advice"
-# TODO 待优化为可变或者直接删除核心候选基因初选定（即删除参考基因组 tool）
+# TODO 已完成 待优化为可变或者直接删除核心候选基因初选定（即删除参考基因组 tool）
 TARGET_GENE = "Si9g037800"  # 当前任务的核心候选基因，所有相关检查都围绕它：是否在 GFF 中出现 是否在功能注释中出现 是否在 significant_de_genes.tsv 中出现 最终回答是否包含 Si9g037800
 # 人工核验文献证据表文件名 保存 DOI 文献标题 引用原句 证据等级 说明
 VERIFIED_LITERATURE_EVIDENCE_FILE = "verified_literature_evidence.tsv"
@@ -39,6 +61,12 @@ REQUIRED_FILES = {
     "sample_map": "sampleName_clientId.txt",
     "metabolome": "metabolome_raw_3372.tsv",
     "pipeline_script": "run_smoke_de_pipeline.sh",
+}
+
+SAMPLE_MAP_HEADER_ALIASES = {
+    "sample": ("sample", "sample_id", "samplename", "sample_name", "name"),
+    "group": ("group", "treatment", "condition", "class"),
+    "client_id": ("client_id", "clientid", "client", "label"),
 }
 
 '''正则表达式定义'''
@@ -187,6 +215,186 @@ class BreedingValidationPlanInput(BaseModel):
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     #用UTF-8把字符串写入文件，要求： 直接保留中文  json缩进2个空格  key按字母排序
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _split_sample_map_row(line: str) -> list[str]:
+    stripped = str(line or "").strip()
+    if not stripped:
+        return []
+    if "\t" in stripped:
+        return [part.strip() for part in stripped.split("\t")]
+    return [part.strip() for part in re.split(r"\s+", stripped) if part.strip()]
+
+
+def _sample_map_alias_index(headers: list[str], alias_group: str) -> int | None:
+    aliases = SAMPLE_MAP_HEADER_ALIASES[alias_group]
+    normalized_headers = [str(item or "").strip().lstrip("#").lower() for item in headers]
+    for index, header in enumerate(normalized_headers):
+        if header in aliases:
+            return index
+    return None
+
+
+def _infer_pipeline_group_label(group_value: str) -> str:
+    normalized = str(group_value or "").strip()
+    upper = normalized.upper()
+    tokens = [token for token in re.split(r"[^A-Z0-9]+", upper) if token]
+    token_set = set(tokens)
+    if "LM" in token_set or "LH" in token_set or "CK" in token_set or "CONTROL" in token_set or "REFERENCE" in token_set:
+        return "LM"
+    if "JM" in token_set or "JH" in token_set or "TREATED" in token_set or "TREATMENT" in token_set or "CASE" in token_set:
+        return "JM"
+    if upper in {"C", "CTRL"}:
+        return "LM"
+    if upper in {"T", "TRT"}:
+        return "JM"
+    return ""
+
+
+def _normalize_sample_map(
+    *,
+    sample_map_path: Path,
+    out_dir: Path,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "pending",
+        "original_path": str(sample_map_path),
+        "normalized_path": "",
+        "compatible_path": "",
+        "preview": [],
+        "columns": [],
+        "row_count": 0,
+        "bad_rows": [],
+        "parse_error": "",
+        "has_header": False,
+        "original_group_values": [],
+        "group_mapping": {},
+        "pipeline_group_mode": "unknown",
+    }
+
+    if not sample_map_path.exists() or not sample_map_path.is_file():
+        result["status"] = "missing"
+        result["parse_error"] = "sample_map_missing"
+        return result
+
+    rows = [_split_sample_map_row(line) for line in sample_map_path.read_text(encoding="utf-8").splitlines()]
+    rows = [row for row in rows if row]
+    if not rows:
+        result["status"] = "failed"
+        result["parse_error"] = "sample_map_empty"
+        return result
+
+    header = rows[0]
+    sample_index = _sample_map_alias_index(header, "sample")
+    group_index = _sample_map_alias_index(header, "group")
+    client_index = _sample_map_alias_index(header, "client_id")
+    has_header = sample_index is not None and (group_index is not None or client_index is not None)
+    result["has_header"] = has_header
+    result["columns"] = header if has_header else []
+
+    if has_header:
+        second_index = group_index if group_index is not None else client_index
+        data_rows = rows[1:]
+    else:
+        if len(header) < 2:
+            result["status"] = "failed"
+            result["parse_error"] = "sample_map_requires_at_least_two_columns"
+            result["columns"] = header
+            return result
+        sample_index = 0
+        second_index = 1
+        data_rows = rows
+
+    normalized_lines: list[str] = []
+    compatible_lines: list[str] = []
+    observed_group_values: list[str] = []
+    ordered_unique_groups: list[str] = []
+    explicit_group_values: list[str] = []
+    for row_number, row in enumerate(data_rows, start=2 if has_header else 1):
+        if sample_index is None or second_index is None or len(row) <= max(sample_index, second_index):
+            result["bad_rows"].append({"row_number": row_number, "row": row, "reason": "missing_required_columns"})
+            continue
+        sample_id = str(row[sample_index]).strip()
+        group_value = str(row[second_index]).strip()
+        if not sample_id or not group_value:
+            result["bad_rows"].append({"row_number": row_number, "row": row, "reason": "empty_sample_or_group"})
+            continue
+        normalized_lines.append(f"{sample_id}\t{group_value}")
+        observed_group_values.append(group_value)
+        if group_index is not None:
+            explicit_group_values.append(group_value)
+            if group_value not in ordered_unique_groups:
+                ordered_unique_groups.append(group_value)
+        compatible_lines.append(f"{sample_id}\t{group_value}")
+
+    result["row_count"] = len(normalized_lines)
+    result["original_group_values"] = ordered_unique_groups
+
+    if not normalized_lines:
+        result["status"] = "failed"
+        result["parse_error"] = "sample_map_contains_no_valid_rows"
+        return result
+
+    pipeline_group_mode = "client_id_passthrough"
+    group_mapping: dict[str, str] = {}
+    if group_index is not None:
+        pipeline_group_mode = "explicit_group_mapped_to_jm_lm"
+        inferred_labels: dict[str, str] = {}
+        for group_value in ordered_unique_groups:
+            inferred = _infer_pipeline_group_label(group_value)
+            if inferred:
+                inferred_labels[group_value] = inferred
+        unresolved_groups = [group_value for group_value in ordered_unique_groups if group_value not in inferred_labels]
+        available_labels = [label for label in ("LM", "JM") if label not in set(inferred_labels.values())]
+        for group_value in unresolved_groups:
+            if available_labels:
+                inferred_labels[group_value] = available_labels.pop(0)
+        if len(set(inferred_labels.values())) < 2 and len(ordered_unique_groups) >= 2:
+            first_group, second_group = ordered_unique_groups[:2]
+            inferred_labels[first_group] = "LM"
+            inferred_labels[second_group] = "JM"
+        if len(ordered_unique_groups) < 2:
+            result["status"] = "failed"
+            result["parse_error"] = "explicit_group_requires_two_distinct_groups"
+            result["group_mapping"] = inferred_labels
+            result["pipeline_group_mode"] = pipeline_group_mode
+            return result
+        unresolved_after_assignment = [
+            group_value for group_value in ordered_unique_groups if not inferred_labels.get(group_value)
+        ]
+        unique_labels = {label for label in inferred_labels.values() if label}
+        if unresolved_after_assignment or len(unique_labels) != 2 or not unique_labels.issubset({"LM", "JM"}):
+            result["status"] = "failed"
+            result["parse_error"] = "explicit_group_cannot_be_mapped_to_jm_lm"
+            result["group_mapping"] = inferred_labels
+            result["pipeline_group_mode"] = pipeline_group_mode
+            return result
+        group_mapping = inferred_labels
+        compatible_lines = []
+        valid_index = 0
+        for row_number, row in enumerate(data_rows, start=2 if has_header else 1):
+            if sample_index is None or second_index is None or len(row) <= max(sample_index, second_index):
+                continue
+            sample_id = str(row[sample_index]).strip()
+            group_value = str(row[second_index]).strip()
+            if not sample_id or not group_value:
+                continue
+            mapped_group = group_mapping[group_value]
+            compatible_lines.append(f"{sample_id}\t{sample_id}_{mapped_group}")
+            valid_index += 1
+    result["group_mapping"] = group_mapping
+    result["pipeline_group_mode"] = pipeline_group_mode
+    result["preview"] = compatible_lines[:6]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    normalized_path = out_dir / "normalized_sampleName_clientId.txt"
+    normalized_path.write_text("\n".join(normalized_lines) + "\n", encoding="utf-8")
+    compatible_path = out_dir / "compatible_sampleName_clientId.txt"
+    compatible_path.write_text("\n".join(compatible_lines) + "\n", encoding="utf-8")
+    result["normalized_path"] = str(normalized_path)
+    result["compatible_path"] = str(compatible_path)
+    result["status"] = "completed"
+    return result
 
 
 # 检查当前数据目录里，smoke 数据包必需文件是否涵盖齐全
@@ -1204,6 +1412,19 @@ def _run_transcriptome_deg_impl(
     genome_fa_path = data_path / genome_fa
     genome_gff_path = data_path / genome_gff
     script_path, resolved_script_path = _resolve_transcriptome_pipeline_script(data_path)
+    sample_map_normalization = _normalize_sample_map(
+        sample_map_path=sample_map_path,
+        out_dir=out_path,
+    )
+    normalized_sample_map_path = str(sample_map_normalization.get("normalized_path") or "")
+    compatible_sample_map_path = str(sample_map_normalization.get("compatible_path") or "")
+    pipeline_sample_map_path = compatible_sample_map_path or normalized_sample_map_path
+    pipeline_sample_map_arg = ""
+    if pipeline_sample_map_path:
+        try:
+            pipeline_sample_map_arg = str(Path(pipeline_sample_map_path).relative_to(data_path))
+        except ValueError:
+            pipeline_sample_map_arg = pipeline_sample_map_path
 
     missing_inputs = [str(path) for path in (sample_map_path, genome_fa_path, genome_gff_path) if not path.exists()]
     fastq_files: list[Path] = []
@@ -1233,6 +1454,7 @@ def _run_transcriptome_deg_impl(
     }
     transcriptome_pipeline_status = "not_enough_inputs"
     transcriptome_pipeline_decision_reason = "missing_required_inputs" if missing_inputs else ""
+    sample_map_parse_error = str(sample_map_normalization.get("parse_error") or "").strip()
 
     def _write_pipeline_log(final_status: str) -> None:
         if (dependency_diagnostics.get("runner_info") or {}).get("executable_not_found"):
@@ -1289,6 +1511,18 @@ def _run_transcriptome_deg_impl(
                     f"upload_root: {data_path}",
                     f"discovered_fastq_count: {len(fastq_files)}",
                     f"discovered_sample_map_path: {sample_map_path}",
+                    f"sample_map_original_path: {sample_map_path}",
+                    f"normalized_sample_map_path: {normalized_sample_map_path}",
+                    f"compatible_sample_map_path: {compatible_sample_map_path}",
+                    f"normalized_sample_map_preview: {json.dumps(sample_map_normalization.get('preview') or [], ensure_ascii=False)}",
+                    f"sample_map_normalization_status: {sample_map_normalization.get('status') or ''}",
+                    f"sample_map_columns: {json.dumps(sample_map_normalization.get('columns') or [], ensure_ascii=False)}",
+                    f"sample_map_rows: {int(sample_map_normalization.get('row_count') or 0)}",
+                    f"bad_sample_map_rows: {json.dumps(sample_map_normalization.get('bad_rows') or [], ensure_ascii=False)}",
+                    f"original_group_values: {json.dumps(sample_map_normalization.get('original_group_values') or [], ensure_ascii=False)}",
+                    f"group_mapping: {json.dumps(sample_map_normalization.get('group_mapping') or {}, ensure_ascii=False)}",
+                    f"pipeline_group_mode: {sample_map_normalization.get('pipeline_group_mode') or ''}",
+                    f"sample_map_parse_error: {sample_map_parse_error}",
                     f"discovered_reference_genome_path: {genome_fa_path}",
                     f"discovered_genome_gff_path: {genome_gff_path}",
                     f"transcriptome_pipeline_runner: {dependency_diagnostics.get('runner') or ''}",
@@ -1333,6 +1567,10 @@ def _run_transcriptome_deg_impl(
             transcriptome_pipeline_status = "failed"
             transcriptome_pipeline_decision_reason = "pipeline_script_not_found"
             pipeline_result["error"] = "pipeline_script_missing"
+        elif sample_map_normalization.get("status") != "completed":
+            transcriptome_pipeline_status = "failed"
+            transcriptome_pipeline_decision_reason = "sample_map_parse_error"
+            pipeline_result["error"] = sample_map_parse_error or "sample_map_parse_error"
         else:
             dependency_diagnostics = _check_pipeline_dependencies(data_dir=data_path)
             missing_tools = list(dependency_diagnostics.get("missing_tools") or [])
@@ -1347,7 +1585,7 @@ def _run_transcriptome_deg_impl(
                     threads,
                     run_log,
                     fq_dir=fq_dir,
-                    sample_map=sample_map,
+                    sample_map=pipeline_sample_map_arg,
                     genome_fa=genome_fa,
                     genome_gff=genome_gff,
                 )
@@ -1403,6 +1641,18 @@ def _run_transcriptome_deg_impl(
         "data_dir": str(data_path),
         "fq_dir": str(fq_path),
         "sample_map": str(sample_map_path),
+        "sample_map_original_path": str(sample_map_path),
+        "normalized_sample_map_path": normalized_sample_map_path,
+        "compatible_sample_map_path": compatible_sample_map_path,
+        "normalized_sample_map_preview": sample_map_normalization.get("preview") or [],
+        "sample_map_normalization_status": sample_map_normalization.get("status") or "",
+        "sample_map_columns": sample_map_normalization.get("columns") or [],
+        "sample_map_rows": int(sample_map_normalization.get("row_count") or 0),
+        "bad_sample_map_rows": sample_map_normalization.get("bad_rows") or [],
+        "original_group_values": sample_map_normalization.get("original_group_values") or [],
+        "group_mapping": sample_map_normalization.get("group_mapping") or {},
+        "pipeline_group_mode": sample_map_normalization.get("pipeline_group_mode") or "",
+        "sample_map_parse_error": sample_map_parse_error,
         "genome_fa": str(genome_fa_path),
         "genome_gff": str(genome_gff_path),
         "resolved_pipeline_script_path": resolved_script_path or "",
@@ -1448,6 +1698,18 @@ def _run_transcriptome_deg_impl(
         "transcriptome_pipeline_runner": dependency_diagnostics.get("runner") or "",
         "dependency_check_mode": dependency_diagnostics.get("mode") or "current_path",
         "dependency_diagnostics": dependency_diagnostics,
+        "sample_map_original_path": str(sample_map_path),
+        "normalized_sample_map_path": normalized_sample_map_path,
+        "compatible_sample_map_path": compatible_sample_map_path,
+        "normalized_sample_map_preview": sample_map_normalization.get("preview") or [],
+        "sample_map_normalization_status": sample_map_normalization.get("status") or "",
+        "sample_map_columns": sample_map_normalization.get("columns") or [],
+        "sample_map_rows": int(sample_map_normalization.get("row_count") or 0),
+        "bad_sample_map_rows": sample_map_normalization.get("bad_rows") or [],
+        "original_group_values": sample_map_normalization.get("original_group_values") or [],
+        "group_mapping": sample_map_normalization.get("group_mapping") or {},
+        "pipeline_group_mode": sample_map_normalization.get("pipeline_group_mode") or "",
+        "sample_map_parse_error": sample_map_parse_error,
         "artifacts": artifacts,
     }
 

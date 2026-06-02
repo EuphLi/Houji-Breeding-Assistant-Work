@@ -30,6 +30,26 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 BREEDING_WORKBENCH_SOURCE = "breeding-workbench"
 BREEDING_WORKBENCH_DIRECT_TOOL = "omics_breeding_analysis_run"
 
+"""
+所属层次：
+后端异步执行层 / worker 层 / run meta 恢复层
+负责真正执行前端创建的任务。
+是 YuXi 后端的任务执行器。前端提交后，任务进入后端任务队列或 run 队列，再由 worker 取出执行
+
+它在数据流中的位置：
+chat_service.py 创建任务
+  ↓
+Redis / run queue
+  ↓
+run_worker.py 取任务
+  ↓
+恢复 run meta
+  ↓
+判断是不是 breeding-workbench 请求
+  ↓
+交给 omics_breeding_analysis_run
+"""
+
 
 class RetryableRunError(Exception):
     """Error type that should trigger ARQ retry."""
@@ -247,6 +267,7 @@ async def process_agent_run(ctx, run_id: str):
     # 当前仍只完成 meta 传递保真；allowed_tools 后续还需要在 Agent tool binding / registry 层做真正过滤。
     meta = {
         **frontend_meta,
+        "run_id": run_id,
         "request_id": request_id,
         "query": query,
         "agent_id": agent_id,

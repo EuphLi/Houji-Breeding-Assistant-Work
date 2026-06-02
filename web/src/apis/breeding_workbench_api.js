@@ -27,7 +27,9 @@ export const HARD_TIMEOUT_MS = 420000
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const hasCompletedResultContent = ({ frontendPayload = null, markdown = '' } = {}) => {
-  if (frontendPayload) return true
+  if (typeof frontendPayload?.answer_markdown === 'string' && frontendPayload.answer_markdown.trim()) {
+    return true
+  }
   const normalizedMarkdown = typeof markdown === 'string' ? markdown.trim() : ''
   return normalizedMarkdown.includes('分析流程已完成')
 }
@@ -97,20 +99,48 @@ const extractJsonPayloadFromMessage = (message) => {
   return null
 }
 
-const extractFrontendPayloadFromHistory = (history = []) => {
+const matchesFrontendPayloadContext = (payload = null, { runId = '', requestId = '' } = {}) => {
+  if (!payload || typeof payload !== 'object') return false
+  if (runId && typeof payload.run_id === 'string' && payload.run_id.trim() && payload.run_id !== runId) {
+    return false
+  }
+  if (
+    requestId &&
+    typeof payload.request_id === 'string' &&
+    payload.request_id.trim() &&
+    payload.request_id !== requestId
+  ) {
+    return false
+  }
+  return true
+}
+
+const extractFrontendPayloadFromHistory = (history = [], { runId = '', requestId = '' } = {}) => {
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const message = history[index]
+    if (matchesFrontendPayloadContext(message?.frontend_payload, { runId, requestId })) {
+      return message.frontend_payload
+    }
+    if (matchesFrontendPayloadContext(message?.extra_metadata?.frontend_payload, { runId, requestId })) {
+      return message.extra_metadata.frontend_payload
+    }
+    if (matchesFrontendPayloadContext(message?.metadata?.frontend_payload, { runId, requestId })) {
+      return message.metadata.frontend_payload
+    }
     const payload = extractJsonPayloadFromMessage(message)
 
-    if (payload?.frontend_payload) {
+    if (matchesFrontendPayloadContext(payload?.frontend_payload, { runId, requestId })) {
       return payload.frontend_payload
     }
 
-    if (payload?.frontendPayload) {
+    if (matchesFrontendPayloadContext(payload?.frontendPayload, { runId, requestId })) {
       return payload.frontendPayload
     }
 
-    if (payload?.schema_version === 'omics_frontend_payload.v1') {
+    if (
+      payload?.schema_version === 'omics_frontend_payload.v1' &&
+      matchesFrontendPayloadContext(payload, { runId, requestId })
+    ) {
       return payload
     }
   }
@@ -266,7 +296,7 @@ export const buildRunSnapshot = ({
   const finalRenderable = extractFinalRenderableMessage(scopedHistory)
   // 提取 frontendPayload（结构化字段）
   // 尝试从不同位置的 message 取结构化数据，兼容 YuXi history 里不同类型的消息结构
-  const frontendPayload = extractFrontendPayloadFromHistory(scopedHistory)
+  const frontendPayload = extractFrontendPayloadFromHistory(scopedHistory, { runId, requestId })
   // 提取工具调用链
   const historyToolData = extractToolDataFromHistory(scopedHistory)
   const runStateToolChain = extractToolDataFromRunState(runState)

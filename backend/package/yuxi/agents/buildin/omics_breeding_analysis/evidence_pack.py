@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 """
+证据数据结构层 / Evidence Pack schema 层 / 证据统一组织层
 当前多组学育种分析智能体的 证据标准化层
 把已经拿到的多组学证据、文献证据、用户任务信息整理成统一 JSON 结构：
 trait + question
@@ -15,6 +16,12 @@ trait + question
 ↓
 omics_evidence_pack.json
 它是后续 Citation、Guard、前端溯源展示的共同输入
+在数据流中的位置
+evidence_adapters.py
+  ↓
+evidence_pack.py 定义的数据结构
+  ↓
+citation_engine.py / presentation.py
 """
 
 # 表示哪些任务类型需要后续 群体层面 的验证建议，后续需要在群体中结合基因型和性状数据验证
@@ -86,6 +93,7 @@ def build_guard_requirements(
     question: str,
     target_genes: list[str],
     literature_records: list[dict[str, Any]],
+    annotation_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """构建动态 Guard 要求。
 
@@ -108,6 +116,11 @@ def build_guard_requirements(
 
     # 把当前 trait 作为动态性状词
     trait_terms = _deduplicate_preserve_order([trait])
+    annotation_gene_ids: list[str] = []
+    if annotation_evidence:
+        for record in annotation_evidence:
+            metadata = record.get("metadata") or {}
+            annotation_gene_ids.extend(metadata.get("annotation_candidate_gene_ids") or [])
 
     # 返回结构 即后续Guard的输入规范，后续按这些规则检查回答
     return {
@@ -119,6 +132,7 @@ def build_guard_requirements(
         "must_include_population_validation": requires_population_validation,
         "allowed_dois": allowed_dois,
         "allowed_quoted_sentences": allowed_quotes,
+        "annotation_candidate_gene_ids": _deduplicate_preserve_order(annotation_gene_ids),
         "forbidden_claim_types": [
             "fabricated_doi",
             "fabricated_quoted_sentence",
@@ -126,6 +140,8 @@ def build_guard_requirements(
             "completed_wet_lab_validation",
             "final_kasp_caps_marker_developed",
             "final_breeding_conclusion_confirmed",
+            "annotation_as_wet_lab_validation",
+            "annotation_as_direct_causal_evidence",
         ],
     }
 
@@ -139,6 +155,7 @@ def build_omics_evidence_pack(
     literature_records: list[dict[str, Any]] | None = None,
     metabolome_context: list[dict[str, Any]] | None = None,
     genome_context: list[dict[str, Any]] | None = None,
+    annotation_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """构建多组学育种分析 Evidence Pack。
 
@@ -150,6 +167,7 @@ def build_omics_evidence_pack(
     literature_records = literature_records or []
     metabolome_context = metabolome_context or []
     genome_context = genome_context or []
+    annotation_evidence = annotation_evidence or []
 
     # 提取目标基因
     target_genes = extract_target_genes(transcriptome_records)
@@ -173,12 +191,14 @@ def build_omics_evidence_pack(
             "literature": literature_records,
             "metabolome_context": metabolome_context,
             "genome_context": genome_context,
+            "annotation": annotation_evidence,
         },
         "guard_requirements": build_guard_requirements(  # 后续 Guard 的动态检查要求
             trait=trait,
             question=question,
             target_genes=target_genes,
             literature_records=literature_records,
+            annotation_evidence=annotation_evidence,
         ),
     }
 

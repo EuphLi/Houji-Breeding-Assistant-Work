@@ -18,6 +18,7 @@ from yuxi.agents.toolkits import get_all_tool_instances
 from yuxi.agents.toolkits.breeding.tools import (
     TARGET_GENE,
     _check_pipeline_dependencies,
+    _normalize_sample_map,
     _run_transcriptome_deg_impl,
     _run_transcriptome_pipeline,
     _guard_advice,
@@ -301,6 +302,187 @@ def test_transcriptome_deg_reports_completed_output_in_upload_root(tmp_path: Pat
     assert result["transcriptome_pipeline_status"] == "completed"
     assert Path(result["significant_de_genes_path"]).exists()
     assert result["significant_de_genes_path"] == str(data_dir / "transcriptome_deg" / "significant_de_genes.tsv")
+
+
+def test_normalize_sample_map_prefers_group_column_and_skips_header(tmp_path: Path):
+    sample_map_path = tmp_path / "sampleName_clientId.txt"
+    sample_map_path.write_text(
+        "sample\tgroup\tclient_id\n"
+        "Unknown_CS715-002T0001\tFla-LH\tUnknown_CS715-002T0001\n"
+        "Unknown_CS715-002T0004\tFla-JH\tUnknown_CS715-002T0004\n",
+        encoding="utf-8",
+    )
+
+    result = _normalize_sample_map(sample_map_path=sample_map_path, out_dir=tmp_path / "transcriptome_deg")
+
+    normalized_path = Path(result["normalized_path"])
+    compatible_path = Path(result["compatible_path"])
+    assert result["status"] == "completed"
+    assert result["columns"] == ["sample", "group", "client_id"]
+    assert normalized_path.read_text(encoding="utf-8").splitlines() == [
+        "Unknown_CS715-002T0001\tFla-LH",
+        "Unknown_CS715-002T0004\tFla-JH",
+    ]
+    assert compatible_path.read_text(encoding="utf-8").splitlines() == [
+        "Unknown_CS715-002T0001\tUnknown_CS715-002T0001_LM",
+        "Unknown_CS715-002T0004\tUnknown_CS715-002T0004_JM",
+    ]
+    assert result["original_group_values"] == ["Fla-LH", "Fla-JH"]
+    assert result["group_mapping"] == {"Fla-LH": "LM", "Fla-JH": "JM"}
+    assert result["pipeline_group_mode"] == "explicit_group_mapped_to_jm_lm"
+    assert "sample\tgroup" not in normalized_path.read_text(encoding="utf-8")
+
+
+def test_normalize_sample_map_uses_client_id_when_group_header_missing(tmp_path: Path):
+    sample_map_path = tmp_path / "sampleName_clientId.txt"
+    sample_map_path.write_text(
+        "sample\tclient_id\n"
+        "sample1\tclientA\n"
+        "sample2\tclientB\n",
+        encoding="utf-8",
+    )
+
+    result = _normalize_sample_map(sample_map_path=sample_map_path, out_dir=tmp_path / "transcriptome_deg")
+
+    assert result["status"] == "completed"
+    assert Path(result["normalized_path"]).read_text(encoding="utf-8").splitlines() == [
+        "sample1\tclientA",
+        "sample2\tclientB",
+    ]
+    assert Path(result["compatible_path"]).read_text(encoding="utf-8").splitlines() == [
+        "sample1\tclientA",
+        "sample2\tclientB",
+    ]
+    assert result["pipeline_group_mode"] == "client_id_passthrough"
+
+
+def test_normalize_sample_map_preserves_headerless_two_column_format(tmp_path: Path):
+    sample_map_path = tmp_path / "sampleName_clientId.txt"
+    sample_map_path.write_text(
+        "sample1\tFla-LH\n"
+        "sample2\tFla-JH\n",
+        encoding="utf-8",
+    )
+
+    result = _normalize_sample_map(sample_map_path=sample_map_path, out_dir=tmp_path / "transcriptome_deg")
+
+    assert result["status"] == "completed"
+    assert result["columns"] == []
+    assert Path(result["normalized_path"]).read_text(encoding="utf-8").splitlines() == [
+        "sample1\tFla-LH",
+        "sample2\tFla-JH",
+    ]
+    assert Path(result["compatible_path"]).read_text(encoding="utf-8").splitlines() == [
+        "sample1\tFla-LH",
+        "sample2\tFla-JH",
+    ]
+
+
+def test_transcriptome_deg_pipeline_uses_normalized_sample_map(tmp_path: Path, monkeypatch):
+    data_dir = tmp_path / "uploaded_case"
+    (data_dir / "fq").mkdir(parents=True)
+    (data_dir / "fq" / "sample1.fq.gz").write_bytes(b"fake-fastq")
+    (data_dir / "genome.fa").write_text(">chr1\nATGC\n", encoding="utf-8")
+    (data_dir / "genome.gff").write_text("chr1\tsrc\tgene\t1\t10\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+    (data_dir / "sampleName_clientId.txt").write_text(
+        "sample\tgroup\tclient_id\n"
+        "Unknown_CS715-002T0001\tFla-LH\tUnknown_CS715-002T0001\n"
+        "Unknown_CS715-002T0004\tFla-JH\tUnknown_CS715-002T0004\n",
+        encoding="utf-8",
+    )
+    script = tmp_path / "run_smoke_de_pipeline.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._resolve_transcriptome_pipeline_script",
+        lambda _data_dir: (script, str(script)),
+    )
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._check_pipeline_dependencies",
+        lambda **kwargs: {
+            "runner": "",
+            "mode": "current_path",
+            "checks": {},
+            "r_package_checks": {},
+            "missing_tools": [],
+            "missing_r_packages": [],
+        },
+    )
+
+    captured_sample_map: dict[str, str] = {}
+
+    def fake_pipeline(*args, **kwargs):
+        captured_sample_map["sample_map"] = kwargs["sample_map"]
+        normalized_path = data_dir / kwargs["sample_map"]
+        assert normalized_path.read_text(encoding="utf-8").splitlines() == [
+            "Unknown_CS715-002T0001\tUnknown_CS715-002T0001_LM",
+            "Unknown_CS715-002T0004\tUnknown_CS715-002T0004_JM",
+        ]
+        deg_dir = args[1] / "de_pipeline_out" / "04_de"
+        deg_dir.mkdir(parents=True, exist_ok=True)
+        (deg_dir / "significant_de_genes.tsv").write_text(
+            "gene_id\tlogFC\tpvalue\tpadj\nGeneA\t1.0\t0.01\t0.02\n",
+            encoding="utf-8",
+        )
+        return {
+            "attempted": True,
+            "returncode": 0,
+            "command": ["bash", str(script), "--sample-map", kwargs["sample_map"]],
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "error": "",
+            "resolved_script_path": str(script),
+        }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools._run_transcriptome_pipeline",
+        fake_pipeline,
+    )
+
+    result = _run_transcriptome_deg_impl(
+        data_dir=str(data_dir),
+        fq_dir="fq",
+        sample_map="sampleName_clientId.txt",
+        genome_fa="genome.fa",
+        genome_gff="genome.gff",
+        out_dir=str(data_dir / "transcriptome_deg"),
+        threads=4,
+        run_pipeline=True,
+    )
+
+    run_log_text = (data_dir / "transcriptome_deg" / "run.log").read_text(encoding="utf-8")
+    assert result["status"] == "completed"
+    assert captured_sample_map["sample_map"] == "transcriptome_deg/compatible_sampleName_clientId.txt"
+    assert result["normalized_sample_map_path"].endswith("normalized_sampleName_clientId.txt")
+    assert result["compatible_sample_map_path"].endswith("compatible_sampleName_clientId.txt")
+    assert result["sample_map_normalization_status"] == "completed"
+    assert "sample_map_original_path:" in run_log_text
+    assert "normalized_sample_map_path:" in run_log_text
+    assert "compatible_sample_map_path:" in run_log_text
+    assert "sample_map_normalization_status: completed" in run_log_text
+    assert 'original_group_values: ["Fla-LH", "Fla-JH"]' in run_log_text
+    assert 'group_mapping: {"Fla-LH": "LM", "Fla-JH": "JM"}' in run_log_text
+    assert "pipeline_group_mode: explicit_group_mapped_to_jm_lm" in run_log_text
+    assert "sample_map\tgroup\tclient_id" not in Path(result["normalized_sample_map_path"]).read_text(encoding="utf-8")
+
+
+def test_normalize_sample_map_preserves_official_client_id_format_with_jm_lm(tmp_path: Path):
+    sample_map_path = tmp_path / "sampleName_clientId.txt"
+    sample_map_path.write_text(
+        "#sampleName\tclientId\n"
+        "Unknown_CS715-002T0001\tTG5-101_LM-转-1\n"
+        "Unknown_CS715-002T0004\tTG5-101_JM-转-1\n",
+        encoding="utf-8",
+    )
+
+    result = _normalize_sample_map(sample_map_path=sample_map_path, out_dir=tmp_path / "transcriptome_deg")
+
+    assert result["status"] == "completed"
+    assert result["pipeline_group_mode"] == "client_id_passthrough"
+    assert Path(result["compatible_path"]).read_text(encoding="utf-8").splitlines() == [
+        "Unknown_CS715-002T0001\tTG5-101_LM-转-1",
+        "Unknown_CS715-002T0004\tTG5-101_JM-转-1",
+    ]
 
 
 def test_pipeline_dependency_checks_use_current_path_when_runner_unset(tmp_path: Path, monkeypatch):

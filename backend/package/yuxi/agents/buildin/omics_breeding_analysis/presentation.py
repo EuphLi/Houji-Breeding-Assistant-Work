@@ -3,6 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+"""
+最终报告渲染层 / Markdown 组装层 / 来源索引生成层
+负责“把这些关系写成用户看到的 Markdown”
+
+在数据流中的位置
+Evidence Pack + citations + claim_trace
+  ↓
+presentation.py
+  ↓
+answer_markdown / source index / literature cards / trace table
+
+"""
+
+
 
 def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
@@ -23,6 +37,46 @@ def _artifact_type(path: str) -> str:
         return "table"
 
     return "file"
+
+
+def _build_debug_evidence_context(citations: list[Any]) -> dict[str, Any]:
+    """Build a compact evidence context mirror for debugging LLM inputs.
+
+    This intentionally keeps only candidate-level summaries. It must not expose
+    the full uploaded annotation table.
+    """
+
+    annotation_items: list[dict[str, Any]] = []
+    for item in citations:
+        if not isinstance(item, dict) or item.get("source_type") != "annotation":
+            continue
+        metadata = item.get("metadata") or {}
+        annotation_items.append(
+            {
+                "citation_id": item.get("citation_id", ""),
+                "annotation_file": metadata.get("annotation_file", ""),
+                "annotation_file_name": metadata.get("annotation_file_name", ""),
+                "annotation_path_exists": bool(metadata.get("annotation_path_exists")),
+                "annotation_gene_match_count": int(
+                    metadata.get("annotation_gene_match_count") or 0
+                ),
+                "annotation_unmatched_gene_count": int(
+                    metadata.get("annotation_unmatched_gene_count") or 0
+                ),
+                "annotation_candidate_gene_ids": metadata.get(
+                    "annotation_candidate_gene_ids"
+                )
+                or [],
+                "candidate_annotations": metadata.get("candidate_annotations") or [],
+                "pathway_summary": metadata.get("pathway_summary") or [],
+                "evidence_role": metadata.get("evidence_role", "")
+                or "功能注释线索，不等同于功能验证",
+            }
+        )
+
+    return {
+        "annotation": annotation_items,
+    }
 
 
 # 展示适配层。它不生成新结论，只整理已有 final_result
@@ -59,12 +113,14 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
             continue
 
         citation_ids = _as_list(item.get("citation_ids"))
+        source_status = item.get("source_status", "needs_citation")
         claim_trace_rows.append(
             {
                 "claim_id": item.get("claim_id", ""),
                 "text": item.get("text", ""),
                 "citation_ids": citation_ids,
-                "source_status": item.get("source_status", "uncited"),
+                "source_status": source_status,
+                "explanation": item.get("explanation", ""),
                 "sources": [
                     citation_index[citation_id]
                     for citation_id in citation_ids
@@ -88,8 +144,10 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
         "schema_version": "omics_frontend_payload.v1",
         "status": final_result.get("status", ""),
         "backend": final_result.get("backend", ""),
+        "raw_answer_backend": final_result.get("raw_answer_backend", ""),
         "llamaindex_available": bool(final_result.get("llamaindex_available")),
         "answer_markdown": final_result.get("answer_markdown", ""),
+        "raw_llm_answer": final_result.get("raw_llm_answer", ""),
         "summary": final_result.get("summary") or {},
         "warnings": _as_list(final_result.get("warnings")),
         "literature_cards": literature_cards,
@@ -107,8 +165,14 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
             "supported_count": sum(
                 1 for row in claim_trace_rows if row["source_status"] == "supported"
             ),
-            "uncited_count": sum(
-                1 for row in claim_trace_rows if row["source_status"] == "uncited"
+            "background_count": sum(
+                1 for row in claim_trace_rows if row["source_status"] == "background"
+            ),
+            "guard_count": sum(
+                1 for row in claim_trace_rows if row["source_status"] == "guard"
+            ),
+            "needs_citation_count": sum(
+                1 for row in claim_trace_rows if row["source_status"] == "needs_citation"
             ),
         },
         "guard_panel": {
@@ -123,5 +187,10 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
         "artifact_panel": {
             "artifacts": artifact_links,
             "artifact_count": len(artifact_links),
+        },
+        "debug_panel": {
+            "raw_llm_answer": final_result.get("raw_llm_answer", ""),
+            "analysis_prompt": final_result.get("analysis_prompt") or {},
+            "evidence_context": _build_debug_evidence_context(citations),
         },
     }

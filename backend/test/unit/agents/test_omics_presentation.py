@@ -14,9 +14,11 @@ from yuxi.agents.buildin.omics_breeding_analysis.presentation import (
 def test_build_frontend_payload_groups_final_result_for_display():
     final_result = {
         "status": "completed",
-        "backend": "mock_fallback",
+        "backend": "canonical_renderer",
+        "raw_answer_backend": "llm",
         "llamaindex_available": False,
         "answer_markdown": "GeneA 是候选基因。[T1]",
+        "raw_llm_answer": "raw llm body",
         "summary": {
             "target_genes": ["GeneA"],
             "trait_terms": ["抗旱"],
@@ -55,7 +57,8 @@ def test_build_frontend_payload_groups_final_result_for_display():
                 "claim_id": "C2",
                 "text": "这是一条无 citation 的说明",
                 "citation_ids": [],
-                "source_status": "uncited",
+                "source_status": "needs_citation",
+                "explanation": "关键结论句缺少 citation id。",
             },
         ],
         "guard_result": {
@@ -77,20 +80,23 @@ def test_build_frontend_payload_groups_final_result_for_display():
     assert payload["schema_version"] == "omics_frontend_payload.v1"
     assert payload["status"] == "completed"
     assert payload["answer_markdown"] == "GeneA 是候选基因。[T1]"
+    assert payload["raw_llm_answer"] == "raw llm body"
 
     assert payload["citation_panel"]["citation_count"] == 2
     assert payload["literature_panel"]["card_count"] == 1
 
     assert payload["claim_trace_panel"]["row_count"] == 2
     assert payload["claim_trace_panel"]["supported_count"] == 1
-    assert payload["claim_trace_panel"]["uncited_count"] == 1
+    assert payload["claim_trace_panel"]["needs_citation_count"] == 1
     assert payload["claim_trace_panel"]["rows"][0]["sources"][0]["citation_id"] == "T1"
+    assert payload["claim_trace_panel"]["rows"][1]["explanation"] == "关键结论句缺少 citation id。"
 
     assert payload["guard_panel"]["passed"] is True
 
     assert payload["artifact_panel"]["artifact_count"] == 3
     assert payload["artifact_panel"]["artifacts"][0]["type"] == "json"
     assert payload["artifact_panel"]["artifacts"][1]["type"] == "markdown"
+    assert payload["debug_panel"]["raw_llm_answer"] == "raw llm body"
 
 
 # 测试模拟一个 Guard 失败的 final_result，确认错误信息、伪造 DOI、伪造引用原句不会丢失

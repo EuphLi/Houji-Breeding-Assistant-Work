@@ -87,8 +87,13 @@ def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.Mo
     assert payload["status"] == "completed"
     assert payload["answer_markdown"]
     assert payload["summary"]["analysis_backend"] == "llm"
+    assert payload["summary"]["render_backend"] == "canonical_renderer"
 
-    assert payload["citation_panel"]["citation_count"] == 2
+    assert payload["citation_panel"]["citation_count"] == 3
+    assert any(
+        item["citation_id"] == "Guard"
+        for item in payload["citation_panel"]["citations"]
+    )
     assert payload["literature_panel"]["card_count"] == 1
     assert payload["guard_panel"]["passed"] is True
     assert payload["claim_trace_panel"]["row_count"] >= 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+from contextlib import asynccontextmanager
 import sys
 from types import SimpleNamespace
 from types import ModuleType
@@ -193,6 +194,17 @@ class _FakeConvRepo:
         }
         self.tool_updates.append(payload)
         return SimpleNamespace(id=1, **payload)
+
+
+class _FakeSessionContextFactory:
+    def __init__(self):
+        self.sessions: list[object] = []
+
+    @asynccontextmanager
+    async def get_async_session_context(self):
+        session = object()
+        self.sessions.append(session)
+        yield session
 
 
 async def _capture_stream_input_context(
@@ -515,6 +527,105 @@ async def test_stream_agent_chat_directly_runs_omics_tool_for_breeding_workbench
     assert chunks[-1]["result"]["backend"] in {"llm", "rule_fallback"}
     assert repo.tool_calls[0]["tool_name"] == "omics_breeding_analysis_run"
     assert [item["role"] for item in repo.saved_messages] == ["user", "assistant", "tool", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_chat_persists_progress_snapshots_before_final_result(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo_holder: dict[str, _FakeConvRepo] = {}
+    progress_sessions = _FakeSessionContextFactory()
+
+    def fake_conv_repo(db):
+        repo = _FakeConvRepo(db)
+        repo_holder.setdefault(str(id(db)), repo)
+        return repo
+
+    async def fake_get_agent_config_by_id(db, user, agent_config_id):
+        del db, user, agent_config_id
+        return SimpleNamespace(agent_id="test-agent", config_json={"context": {}})
+
+    async def fake_noop(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    async def fake_guard_check(_content):
+        return False
+
+    monkeypatch.setattr(svc, "ConversationRepository", fake_conv_repo)
+    monkeypatch.setattr(svc, "get_agent_config_by_id", fake_get_agent_config_by_id)
+    monkeypatch.setattr(svc, "_ensure_thread_bound_agent_config", fake_noop)
+    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
+    monkeypatch.setattr(svc, "pg_manager", progress_sessions)
+
+    fake_tool_module = ModuleType("yuxi.agents.toolkits.breeding.omics_analysis")
+
+    def fake_runner(**kwargs):
+        progress_callback = kwargs["progress_callback"]
+        progress_callback(
+            {
+                "transcriptome_pipeline_status": "running",
+                "transcriptome_path_exists": False,
+                "pipeline_log_path": "/tmp/run.log",
+            }
+        )
+        progress_callback(
+            {
+                "transcriptome_pipeline_status": "completed",
+                "transcriptome_path_exists": True,
+                "transcriptome_result_path": "/tmp/significant_de_genes.tsv",
+                "pipeline_log_path": "/tmp/run.log",
+            }
+        )
+        return {
+            "status": "completed",
+            "backend": "rule_fallback",
+            "answer_markdown": "# 多组学育种分析结果\n\n分析流程已完成。",
+            "frontend_payload": {
+                "schema_version": "omics_frontend_payload.v1",
+                "answer_markdown": "# 多组学育种分析结果\n\n分析流程已完成。",
+                "summary": {"analysis_backend": "rule_fallback"},
+            },
+            "warnings": [],
+        }
+
+    fake_tool_module._run_omics_breeding_analysis_impl = fake_runner
+    fake_tool_module.omics_breeding_analysis_run = SimpleNamespace(
+        invoke=lambda payload: (_ for _ in ()).throw(AssertionError(f"unexpected fallback invoke: {payload}"))
+    )
+    monkeypatch.setitem(sys.modules, "yuxi.agents.toolkits.breeding.omics_analysis", fake_tool_module)
+
+    chunks = []
+    async for chunk in svc.stream_agent_chat(
+        query="给出一些育种建议",
+        agent_config_id=123,
+        thread_id="thread-1",
+        meta={
+            "run_id": "run-1",
+            "request_id": "req-1",
+            "source": "breeding-workbench",
+            "trait": "黄酮相关",
+            "question": "给出一些育种建议",
+            "preferred_tool": "omics_breeding_analysis_run",
+            "breeding_context": {"data_dir": "/tmp/demo"},
+        },
+        image_content=None,
+        current_user=SimpleNamespace(id="user-1", department_id="dept-1"),
+        db=object(),
+    ):
+        chunks.append(json.loads(chunk.decode("utf-8").strip()))
+
+    direct_repo = next(repo for key, repo in repo_holder.items() if repo.tool_calls)
+    progress_repos = [repo for repo in repo_holder.values() if repo is not direct_repo]
+    assert chunks[-1]["status"] == "finished"
+    assert len(progress_sessions.sessions) == 2
+    assert len(progress_repos) == 2
+    assert [repo.saved_messages[0]["extra_metadata"]["frontend_payload"]["summary"]["transcriptome_pipeline_status"] for repo in progress_repos] == [
+        "running",
+        "completed",
+    ]
+    assert all(repo.saved_messages[0]["extra_metadata"]["run_id"] == "run-1" for repo in progress_repos)
+    assert all(repo.saved_messages[0]["extra_metadata"]["progress_snapshot"] is True for repo in progress_repos)
 
 
 def test_buildin_package_remains_discoverable_after_chat_service_stub():

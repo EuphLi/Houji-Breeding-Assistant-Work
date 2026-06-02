@@ -42,22 +42,18 @@ DEFAULT_BREEDING_DATA_DIR = (
 
 
 """
-之前前端的链路：
-BreedingWorkbenchView.vue
-  handleSubmit()
-    ↓
-breeding_workbench_api.js
-  runBreedingWorkbench()
-    ↓
-agentApi.createAgentRun(meta: source=breeding-workbench, preferred_tool=omics_breeding_analysis_run)
+后端服务层 / Chat Run 创建层 / run meta 写入层 / worker 上游
+是 YuXi 框架中的聊天服务入口。它负责把前端提交的问题、上下文、metadata 等写入后端运行任务。
 
-进入后端：
-run_worker.py
-  process_agent_run()
-    ↓
+它在数据流中的位置：相当于前后端中转站
+前端提交请求
+  ↓
 chat_service.py
-  stream_agent_chat()
-当前育种工作台走的是 /api/chat/runs，最终由 run_worker.py: process_agent_run() 调到 chat_service.py: stream_agent_chat()
+  ↓
+创建 run / 写入 run meta
+  ↓
+worker 后续读取任务
+如果这里没有把 breeding_context 写入 run meta，那么 worker 后面就拿不到用户上传路径。
 """
 # 前端 createAgentRun
 #   meta.source = breeding-workbench
@@ -354,6 +350,39 @@ async def _save_direct_breeding_workbench_tool_messages(
                 "tool_execution_mode": "direct_preferred_tool",
                 "tool_name": BREEDING_WORKBENCH_DIRECT_TOOL,
                 "frontend_payload": tool_result.get("frontend_payload") or {},
+            },
+        )
+
+
+async def _save_direct_breeding_workbench_progress_message(
+    *,
+    thread_id: str,
+    run_id: str,
+    request_id: str,
+    progress_summary: dict[str, Any],
+) -> None:
+    frontend_payload = {
+        "schema_version": "omics_frontend_payload.v1",
+        "source": BREEDING_WORKBENCH_SOURCE,
+        "run_id": run_id,
+        "request_id": request_id,
+        "summary": progress_summary,
+    }
+    async with pg_manager.get_async_session_context() as progress_db:
+        progress_repo = ConversationRepository(progress_db)
+        await progress_repo.add_message_by_thread_id(
+            thread_id=thread_id,
+            role="assistant",
+            content="",
+            message_type="text",
+            extra_metadata={
+                "request_id": request_id,
+                "run_id": run_id,
+                "source": BREEDING_WORKBENCH_SOURCE,
+                "tool_execution_mode": "direct_preferred_tool",
+                "tool_name": BREEDING_WORKBENCH_DIRECT_TOOL,
+                "frontend_payload": frontend_payload,
+                "progress_snapshot": True,
             },
         )
 
@@ -1234,14 +1263,40 @@ async def stream_agent_chat(
 
         try:
             # 第四步：真正执行工具
-            from yuxi.agents.toolkits.breeding.omics_analysis import (
-                omics_breeding_analysis_run,
-            )
+            from yuxi.agents.toolkits.breeding import omics_analysis as omics_analysis_module
 
-            tool_result = await asyncio.to_thread(
-                omics_breeding_analysis_run.invoke,
-                {"input": tool_input},
-            )
+            progress_runner = getattr(omics_analysis_module, "_run_omics_breeding_analysis_impl", None)
+            if callable(progress_runner):
+                loop = asyncio.get_running_loop()
+                progress_futures = []
+
+                def report_progress(progress_summary: dict[str, Any]) -> None:
+                    future = asyncio.run_coroutine_threadsafe(
+                        _save_direct_breeding_workbench_progress_message(
+                            thread_id=thread_id,
+                            run_id=str(meta.get("run_id") or ""),
+                            request_id=meta["request_id"],
+                            progress_summary=progress_summary,
+                        ),
+                        loop,
+                    )
+                    progress_futures.append(future)
+
+                tool_result = await asyncio.to_thread(
+                    progress_runner,
+                    **tool_input,
+                    progress_callback=report_progress,
+                )
+                for progress_future in progress_futures:
+                    try:
+                        await asyncio.wrap_future(progress_future)
+                    except Exception as progress_error:  # noqa: BLE001
+                        logger.warning(f"Error saving direct breeding progress snapshot: {progress_error}")
+            else:
+                tool_result = await asyncio.to_thread(
+                    omics_analysis_module.omics_breeding_analysis_run.invoke,
+                    {"input": tool_input},
+                )
             # 第五步：保存消息到 history
             await _save_direct_breeding_workbench_tool_messages(
                 conv_repo=conv_repo,

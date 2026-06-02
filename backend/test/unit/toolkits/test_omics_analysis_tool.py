@@ -44,8 +44,8 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
 
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
-        "gene_id\tlogFC\tpvalue\tpadj\n"
-        "GeneA\t1.8\t0.003\t0.02\n",
+        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
+        "GeneA\t1.8\t0.003\t0.02\tchalcone--flavonone isomerase\n",
         encoding="utf-8",
     )
 
@@ -70,14 +70,19 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
     )
 
     assert result["status"] == "completed"
-    assert result["backend"] == "rule_fallback"
+    assert result["backend"] == "canonical_renderer"
+    assert result["raw_answer_backend"] == "rule_fallback"
     assert result["guard_result"]["passed"] is True
     assert result["summary"]["target_genes"] == ["GeneA"]
 
     assert "GeneA" in result["answer_markdown"]
     assert "抗旱" in result["answer_markdown"]
-    assert "10.1234/real" not in result["answer_markdown"]
-    assert "Verified sentence." not in result["answer_markdown"]
+    body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
+    assert "10.1234/real" not in body
+    assert "Verified sentence." not in body
+    assert "DOI：10.1234/real" in source_index
+    assert "引用原句：Verified sentence." in source_index
+    assert "注释：chalcone--flavonone isomerase" in source_index
     assert result["summary"]["literature_path_exists"] is True
     assert result["summary"]["usable_literature_count"] == 1
 
@@ -94,6 +99,7 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
     assert result["frontend_payload"]["schema_version"] == "omics_frontend_payload.v1"
     assert result["frontend_payload"]["guard_panel"]["passed"] is True
     assert result["frontend_payload"]["literature_panel"]["card_count"] == 1
+    assert result["frontend_payload"]["claim_trace_panel"]["needs_citation_count"] == 0
     assert result["frontend_payload_path"]
     assert (output_dir / "frontend_payload.json").exists()
 
@@ -257,8 +263,8 @@ def test_search_background_literature_returns_unavailable_when_pubmed_fails(monk
 def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_path):
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
-        "gene_id\tlogFC\tpvalue\tpadj\n"
-        "GeneA\t1.8\t0.003\t0.02\n",
+        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
+        "GeneA\t1.8\t0.003\t0.02\tchalcone--flavonone isomerase\n",
         encoding="utf-8",
     )
 
@@ -278,7 +284,16 @@ def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_pat
     assert result["status"] == "completed"
     assert result["summary"]["literature_path_exists"] is False
     assert result["summary"]["usable_literature_count"] == 0
-    assert "不包含 DOI 引用" in result["answer_markdown"]
+    body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
+    assert "当前未检索到可用 PubMed 背景文献。[Guard]" in body
+    assert "[BG1]" not in body
+    assert "[BG2]" not in body
+    assert "DOI：" not in body
+    assert "当前未检索到可用 PubMed 背景文献" in body
+    assert "DOI：" not in source_index
+    assert "[BG1]" not in source_index
+    assert "[BG2]" not in source_index
+    assert all("BG" not in " ".join(row["citation_ids"]) for row in result["claim_trace"])
 
 
 def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(
@@ -286,8 +301,8 @@ def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(
 ):
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
-        "gene_id\tlogFC\tpvalue\tpadj\n"
-        "GeneA\t1.8\t0.003\t0.02\n",
+        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
+        "GeneA\t1.8\t0.003\t0.02\tchalcone--flavonone isomerase\n",
         encoding="utf-8",
     )
 
@@ -515,6 +530,161 @@ def test_omics_breeding_analysis_tool_runs_fixed_pipeline_into_upload_root(
     assert result["summary"]["metabolome_path_exists"] is True
 
 
+def test_omics_breeding_analysis_tool_emits_transcriptome_progress_snapshots(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "sample1_R1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            deg_path = out_dir / "significant_de_genes.tsv"
+            deg_path.write_text("gene_id\tlogFC\tpvalue\tpadj\nGeneA\t1.5\t0.01\t0.03\n", encoding="utf-8")
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline completed\n", encoding="utf-8")
+            return {
+                "status": "completed",
+                "significant_de_genes_path": str(deg_path),
+                "pipeline_result": {"attempted": True, "returncode": 0},
+                "artifacts": [str(deg_path), str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    progress_updates: list[dict[str, object]] = []
+    output_dir = tmp_path / "omics_run"
+    _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path=str(upload_root / "genome.fa"),
+        genome_gff_path=str(upload_root / "genome.gff"),
+        annotation_path="",
+        sample_map_path=str(upload_root / "sampleName_clientId.txt"),
+        rnaseq_read_paths=[str(fq_dir / "sample1_R1.fq.gz")],
+        upload_root=str(upload_root),
+        uploaded_file_count=4,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+        progress_callback=progress_updates.append,
+    )
+
+    assert [item["transcriptome_pipeline_status"] for item in progress_updates] == [
+        "running",
+        "completed",
+    ]
+    assert progress_updates[0]["transcriptome_pipeline_attempted"] is True
+    assert progress_updates[1]["transcriptome_path_exists"] is True
+    assert str(progress_updates[1]["transcriptome_result_path"]).endswith("significant_de_genes.tsv")
+
+
+def test_omics_breeding_analysis_tool_emits_failed_transcriptome_progress_snapshot(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "sample1_R1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample1\tclient1\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline failed\n", encoding="utf-8")
+            return {
+                "status": "error",
+                "significant_de_genes_path": "",
+                "missing_inputs": [],
+                "missing_tools": [],
+                "pipeline_result": {"attempted": True, "returncode": 1},
+                "artifacts": [str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    progress_updates: list[dict[str, object]] = []
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path=str(upload_root / "genome.fa"),
+        genome_gff_path=str(upload_root / "genome.gff"),
+        annotation_path="",
+        sample_map_path=str(upload_root / "sampleName_clientId.txt"),
+        rnaseq_read_paths=[str(fq_dir / "sample1_R1.fq.gz")],
+        upload_root=str(upload_root),
+        uploaded_file_count=4,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+        progress_callback=progress_updates.append,
+    )
+
+    assert [item["transcriptome_pipeline_status"] for item in progress_updates] == [
+        "running",
+        "failed",
+    ]
+    assert progress_updates[-1]["pipeline_log_path"] == result["summary"]["pipeline_log_path"]
+    assert progress_updates[-1]["transcriptome_path_exists"] is False
+
+
 def test_omics_breeding_analysis_tool_discovers_upload_root_inputs_before_pipeline(
     tmp_path, monkeypatch
 ):
@@ -657,3 +827,201 @@ def test_omics_breeding_analysis_tool_creates_run_log_when_fastq_inputs_incomple
     assert result["summary"]["pipeline_log_path"] == str(run_log)
     assert result["summary"]["data_source"] == "user_provided_path"
     assert result["summary"]["metabolome_path_exists"] is True
+
+
+def test_omics_breeding_analysis_tool_does_not_fallback_to_smoke_gene_when_current_deg_failed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    fq_dir = upload_root / "fq"
+    fq_dir.mkdir(parents=True)
+    (fq_dir / "sample1_R1.fq.gz").write_text("fake fastq\n", encoding="utf-8")
+    (upload_root / "sampleName_clientId.txt").write_text("sample\tgroup\nsample1\tFla-LH\n", encoding="utf-8")
+    (upload_root / "genome.fa").write_text(">chr1\nACGT\n", encoding="utf-8")
+    (upload_root / "genome.gff").write_text("chr1\tsource\tgene\t1\t4\t.\t+\t.\tID=GeneA\n", encoding="utf-8")
+
+    class FakeTranscriptomeTool:
+        @staticmethod
+        def invoke(payload):
+            out_dir = Path(payload["out_dir"])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_log = out_dir / "run.log"
+            run_log.write_text("pipeline failed\n", encoding="utf-8")
+            return {
+                "status": "error",
+                "significant_de_genes_path": "",
+                "missing_inputs": [],
+                "missing_tools": [],
+                "pipeline_result": {"attempted": True, "returncode": 1},
+                "artifacts": [str(run_log)],
+            }
+
+    monkeypatch.setattr(
+        "yuxi.agents.toolkits.breeding.tools.breeding_transcriptome_deg",
+        FakeTranscriptomeTool(),
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path=str(upload_root / "genome.fa"),
+        genome_gff_path=str(upload_root / "genome.gff"),
+        annotation_path="",
+        sample_map_path=str(upload_root / "sampleName_clientId.txt"),
+        rnaseq_read_paths=[str(fq_dir / "sample1_R1.fq.gz")],
+        upload_root=str(upload_root),
+        uploaded_file_count=4,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["summary"]["candidate_genes"] == []
+    assert result["summary"]["candidate_gene_source"] == "none"
+    assert result["summary"]["candidate_gene_source_path"] == ""
+    assert result["summary"]["candidate_gene_fallback_used"] is False
+    assert "Si9g037800" not in result["answer_markdown"]
+    assert "[T1]" not in result["answer_markdown"]
+
+
+def test_omics_breeding_analysis_tool_uses_only_current_run_deg_output_for_candidate_gene(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    upload_root.mkdir(parents=True)
+    deg_path = upload_root / "transcriptome_deg" / "significant_de_genes.tsv"
+    deg_path.parent.mkdir(parents=True)
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
+        "GeneA\t1.5\t0.01\t0.03\tannotation A\n",
+        encoding="utf-8",
+    )
+    historical_root = tmp_path / "historical_workspace"
+    historical_root.mkdir(parents=True)
+    (historical_root / "significant_de_genes.tsv").write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\nSi9g037800\t2.0\t0.001\t0.01\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path="",
+        reference_genome_path="",
+        genome_gff_path="",
+        annotation_path="",
+        sample_map_path="",
+        rnaseq_read_paths=[],
+        upload_root=str(upload_root),
+        uploaded_file_count=1,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["summary"]["candidate_genes"] == ["GeneA"]
+    assert result["summary"]["candidate_gene_source"] == "current_run_deg"
+    assert result["summary"]["candidate_gene_source_path"] == str(deg_path)
+    assert result["summary"]["candidate_gene_fallback_used"] is False
+    assert "GeneA" in result["answer_markdown"]
+    assert "Si9g037800" not in result["answer_markdown"]
+    assert "[T1] 转录组 DEG" in result["answer_markdown"]
+    assert "基因：GeneA" in result["answer_markdown"]
+    assert "基因：Si9g037800" not in result["answer_markdown"]
+    assert all("Si9g037800" not in row["text"] for row in result["claim_trace"])
+    assert any("GeneA" in row["text"] and "T1" in row["citation_ids"] for row in result["claim_trace"])
+
+
+def test_omics_breeding_analysis_tool_does_not_read_historical_deg_outside_current_upload_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "uploaded_case"
+    upload_root.mkdir(parents=True)
+    historical_root = tmp_path / "historical_workspace"
+    historical_root.mkdir(parents=True)
+    (historical_root / "significant_de_genes.tsv").write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\nSi9g037800\t2.0\t0.001\t0.01\n",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "omics_run"
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="给出一些育种建议",
+        transcriptome_result_path="",
+        metabolome_path="",
+        reference_genome_path="",
+        genome_gff_path="",
+        annotation_path="",
+        sample_map_path="",
+        rnaseq_read_paths=[],
+        upload_root=str(upload_root),
+        uploaded_file_count=0,
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    assert result["summary"]["candidate_genes"] == []
+    assert result["summary"]["candidate_gene_source"] == "none"
+    assert result["summary"]["candidate_gene_fallback_used"] is False
+    assert "Si9g037800" not in result["answer_markdown"]
+    assert "[T1]" not in result["answer_markdown"]
+    assert "[T1] 转录组 DEG" not in result["answer_markdown"]
+    assert all("T1" not in row["citation_ids"] for row in result["claim_trace"])

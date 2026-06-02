@@ -5,7 +5,8 @@
         <div class="panel-intro">
           <h2>输入配置</h2>
           <p>
-            左侧维护固定证据流程输入。选择文件后会先上传到 YuXi 工作区，再由后端使用服务端路径进入正式多组学育种分析链路。
+            左侧维护固定证据流程输入。选择文件后会先上传到 YuXi
+            工作区，再由后端使用服务端路径进入正式多组学育种分析链路。
           </p>
         </div>
 
@@ -16,7 +17,9 @@
               <div class="uploaded-file-main">
                 <span class="uploaded-file-label">{{ item.label }}</span>
                 <span class="uploaded-file-name">{{ item.name }}</span>
-                <span class="uploaded-file-status" :class="item.status">{{ item.statusLabel }}</span>
+                <span class="uploaded-file-status" :class="item.status">{{
+                  item.statusLabel
+                }}</span>
               </div>
               <code v-if="item.serverPath" class="uploaded-file-path">{{ item.serverPath }}</code>
             </div>
@@ -181,24 +184,6 @@
                   />
                 </div>
               </div>
-
-              <div class="field-item">
-                <label class="field-label">流程说明</label>
-                <div class="file-input-row file-output-row">
-                  <div class="file-output-note">
-                    <span>固定转录组流程由后端执行，不接受前端上传流程说明文件。</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="field-item">
-                <label class="field-label">差异显著基因结果</label>
-                <div class="file-input-row file-output-row">
-                  <div class="file-output-note">
-                    <span><code>significant_de_genes.tsv</code> 只作为后端固定流程输出展示，不作为用户上传输入。</span>
-                  </div>
-                </div>
-              </div>
             </div>
             <p class="hint-text">
               输入：<code>fq/*.fq.gz</code>、<code>sampleName_clientId.txt</code>、<code>genome.fa</code>、<code>genome.gff</code>；
@@ -318,16 +303,13 @@
 
         <div class="chain-card">
           <div class="chain-card-top">
-            <div class="chain-title">工具调用链</div>
+            <div class="chain-title">执行链路</div>
             <div v-if="displayStatus" class="inline-status">
               <span class="status-label">状态</span>
               <span class="status-pill" :class="`status-${displayStatus.tone}`">
                 {{ displayStatus.label }}
               </span>
             </div>
-          </div>
-          <div v-if="result.toolName" class="chain-meta">
-            <span>tool: {{ result.toolName }}</span>
           </div>
           <div v-if="showSoftTimeoutActions" class="soft-timeout-actions">
             <div class="soft-timeout-text">
@@ -340,13 +322,16 @@
               <a-button size="small" danger @click="handleStopRun">停止本次运行</a-button>
             </div>
           </div>
-          <div v-if="visibleToolChain.length" class="chain-list">
-            <span v-for="item in visibleToolChain" :key="item.name" class="chain-chip">
-              {{ item.label }}
-            </span>
+          <div v-if="executionSteps.length" class="execution-step-list">
+            <div v-for="item in executionSteps" :key="item.key" class="execution-step-item">
+              <div class="execution-step-title">{{ item.label }}</div>
+              <span class="status-pill" :class="`status-${item.tone}`">
+                {{ item.statusLabel }}
+              </span>
+            </div>
           </div>
           <div v-else class="result-block-body">
-            {{ running ? '等待智能体调用工具' : '暂无工具调用记录' }}
+            {{ running ? '等待执行链路状态' : '暂无执行链路信息' }}
           </div>
         </div>
 
@@ -357,193 +342,197 @@
           :message="errorMessage"
           class="result-alert"
         />
-        <div class="result-shell">
-          <a-spin :spinning="running && !softTimeoutState.awaitingDecision" :tip="spinTip">
-            <template v-if="result.markdown">
-              <div class="result-block-grid">
-                <div class="result-block downloads-card">
-                  <div class="result-block-title">下游可复用结果</div>
-                  <div class="download-list">
-                    <button type="button" class="download-card" @click="downloadSignificantDeg">
-                      <span class="download-name">significant_de_genes.tsv</span>
-                      <span class="download-desc">下载差异显著基因结果</span>
-                    </button>
-                    <button type="button" class="download-card" @click="downloadMetabolome">
-                      <span class="download-name">metabolome_raw_3372.tsv</span>
-                      <span class="download-desc">下载代谢组占位结果</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="download-card"
-                      :disabled="!result.markdown"
-                      @click="downloadAdviceMarkdown"
-                    >
-                      <span class="download-name">育种建议</span>
-                      <span class="download-desc">下载当前 breeding_advice.md</span>
-                    </button>
-                  </div>
+        <div class="result-shell" :class="{ 'result-shell-loading': running && !result.markdown }">
+          <template v-if="result.markdown">
+            <div class="markdown-card">
+              <MarkdownContentViewer :content="result.markdown" />
+            </div>
+
+            <a-collapse
+              v-if="result.frontendPayload?.debug_panel?.raw_llm_answer"
+              ghost
+              class="diagnostic-collapse"
+            >
+              <a-collapse-panel key="debug-raw-answer" header="原始 LLM 输出">
+                <div class="raw-answer-toolbar">
+                  <a-button
+                    size="small"
+                    :disabled="!rawLlmOutputText"
+                    @click="downloadRawLlmMarkdown"
+                  >
+                    下载 Markdown
+                  </a-button>
                 </div>
-              </div>
-
-              <div class="markdown-card">
-                <MarkdownContentViewer :content="result.markdown" />
-              </div>
-
-              <div v-if="literatureCards.length" class="result-block literature-card">
-                <div class="result-block-title">文献依据</div>
-                <div class="literature-list">
-                  <div v-for="item in literatureCards" :key="item.citation_id || item.title" class="literature-item">
-                    <div class="literature-doi">
-                      {{ item.doi ? `DOI: ${item.doi}` : item.pmid ? `PMID: ${item.pmid}` : '未提供 DOI/PMID' }}
-                    </div>
-                    <div class="literature-title">{{ item.title || '未提供标题' }}</div>
-                    <div class="literature-source">source: {{ item.source || '-' }}</div>
-                    <div class="literature-quote">
-                      {{ item.quoted_sentence || item.abstract_sentence || '未提供原句/摘要句' }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <a-collapse v-if="claimTraceRows.length" ghost class="diagnostic-collapse">
-                <a-collapse-panel key="claim-trace" header="逐句来源追溯">
-                  <div class="claim-trace-list">
-                    <div v-for="row in claimTraceRows" :key="row.claim_id || row.text" class="claim-trace-item">
-                      <div class="claim-text">{{ row.text }}</div>
-                      <div class="claim-source-meta">
-                        <span>{{ (row.citation_ids || []).join(', ') || 'uncited' }}</span>
-                        <span>{{ row.source_status || '-' }}</span>
-                      </div>
-                      <div v-if="row.sources?.length" class="claim-source-list">
-                        <div v-for="source in row.sources" :key="source.citation_id" class="claim-source-item">
-                          <div>{{ source.metadata?.title || source.metadata?.gene_id || source.citation_id }}</div>
-                          <div>
-                            {{ source.metadata?.doi ? `DOI: ${source.metadata.doi}` : source.metadata?.pmid ? `PMID: ${source.metadata.pmid}` : source.citation_id }}
-                          </div>
-                          <div>{{ source.metadata?.quoted_sentence || source.text }}</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </a-collapse-panel>
-              </a-collapse>
-
-              <div class="markdown-download-footer">
-                <a-button
-                  type="primary"
-                  size="large"
-                  :disabled="!result.markdown"
-                  @click="downloadAdviceMarkdown"
+                <div
+                  v-if="rawLlmOutputText"
+                  class="debug-raw-answer"
                 >
-                  下载育种建议 Markdown
-                </a-button>
-              </div>
-            </template>
-            <a-empty
-              v-else
-              description="提交问题后，这里会显示由后端 Tool / Agent 生成的育种建议结果。"
-            />
-
-            <a-collapse v-if="hasDiagnostics" ghost class="diagnostic-collapse">
-              <a-collapse-panel key="diagnostics" header="运行诊断信息">
-                <div class="diagnostic-grid">
-                  <div class="diagnostic-item">
-                    <span>thread_id</span><code>{{ runDiagnostics.threadId || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>run_id</span><code>{{ runDiagnostics.runId || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>run_status</span><code>{{ runDiagnostics.runStatus || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>elapsed_seconds</span><code>{{ runDiagnostics.elapsedSeconds }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>polling_count</span><code>{{ runDiagnostics.pollingCount }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>last_history_message_role</span
-                    ><code>{{ runDiagnostics.lastHistoryMessageRole || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>parsed_tool_calls</span><code>{{ diagnosticsToolCalls }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>soft_timeout_reached</span
-                    ><code>{{ String(runDiagnostics.softTimeoutReached) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>hard_timeout_reached</span
-                    ><code>{{ String(runDiagnostics.hardTimeoutReached) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>trait</span><code>{{ businessSummary.trait || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>question</span><code>{{ businessSummary.question || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>data_source</span><code>{{ businessSummary.data_source || businessSummary.evidence_level || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>transcriptome_pipeline_status</span><code>{{ businessSummary.transcriptome_pipeline_status || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>transcriptome_input_status</span><code>{{ businessSummary.transcriptome_input_status || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>transcriptome_path_exists</span><code>{{ String(Boolean(businessSummary.transcriptome_path_exists)) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>metabolome_path_exists</span><code>{{ String(Boolean(businessSummary.metabolome_path_exists)) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>metabolome_preview_available</span><code>{{ String(Boolean(businessSummary.metabolome_preview_available)) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>background_literature_count</span><code>{{ businessSummary.background_literature_count ?? '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>literature_card_count</span><code>{{ businessSummary.literature_card_count ?? '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>citation_backend</span><code>{{ businessSummary.citation_backend || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>llamaindex_available</span><code>{{ String(Boolean(businessSummary.llamaindex_available)) }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>pipeline_log_path</span><code>{{ businessSummary.pipeline_log_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>transcriptome_result_path</span><code>{{ businessSummary.transcriptome_result_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item">
-                    <span>uploaded_file_count</span><code>{{ businessSummary.uploaded_file_count ?? 0 }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>submitted_reference_genome_path</span><code>{{ businessSummary.submitted_reference_genome_path || businessSummary.reference_genome_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>submitted_genome_gff_path</span><code>{{ businessSummary.submitted_genome_gff_path || businessSummary.genome_gff_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>submitted_metabolome_path</span><code>{{ businessSummary.submitted_metabolome_path || businessSummary.metabolome_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>submitted_sample_map_path</span><code>{{ businessSummary.submitted_sample_map_path || businessSummary.sample_map_path || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>submitted_rnaseq_read_paths</span><code>{{ (businessSummary.submitted_rnaseq_read_paths || []).join(', ') || '-' }}</code>
-                  </div>
-                  <div class="diagnostic-item full-span">
-                    <span>upload_root</span><code>{{ businessSummary.submitted_upload_root || businessSummary.upload_root || '-' }}</code>
-                  </div>
+                  <MarkdownContentViewer :content="rawLlmOutputText" />
                 </div>
               </a-collapse-panel>
             </a-collapse>
-          </a-spin>
+
+            <div class="markdown-download-footer">
+              <a-button
+                type="primary"
+                size="large"
+                :disabled="!result.markdown"
+                @click="downloadAdviceMarkdown"
+              >
+                下载育种建议 Markdown
+              </a-button>
+            </div>
+          </template>
+          <div v-else-if="running" class="result-loading-state">
+            <div class="result-loading-content">
+              <a-spin size="large" />
+              <p class="result-loading-text">{{ spinTip }}</p>
+            </div>
+          </div>
+          <div v-else class="result-loading-inline">
+            <a-empty description="提交问题后，这里会显示由后端 Tool / Agent 生成的育种建议结果。" />
+          </div>
+
+          <a-collapse v-if="hasDiagnostics" ghost class="diagnostic-collapse">
+            <a-collapse-panel key="diagnostics" header="运行诊断信息">
+              <div class="diagnostic-grid">
+                <div class="diagnostic-item">
+                  <span>thread_id</span><code>{{ runDiagnostics.threadId || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>run_id</span><code>{{ runDiagnostics.runId || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>run_status</span><code>{{ runDiagnostics.runStatus || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>elapsed_seconds</span><code>{{ runDiagnostics.elapsedSeconds }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>polling_count</span><code>{{ runDiagnostics.pollingCount }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>last_history_message_role</span
+                  ><code>{{ runDiagnostics.lastHistoryMessageRole || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>parsed_tool_calls</span><code>{{ diagnosticsToolCalls }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>soft_timeout_reached</span
+                  ><code>{{ String(runDiagnostics.softTimeoutReached) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>hard_timeout_reached</span
+                  ><code>{{ String(runDiagnostics.hardTimeoutReached) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>trait</span><code>{{ businessSummary.trait || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>question</span><code>{{ businessSummary.question || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>data_source</span
+                  ><code>{{
+                    businessSummary.data_source || businessSummary.evidence_level || '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>transcriptome_pipeline_status</span
+                  ><code>{{ businessSummary.transcriptome_pipeline_status || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>transcriptome_input_status</span
+                  ><code>{{ businessSummary.transcriptome_input_status || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>transcriptome_path_exists</span
+                  ><code>{{ String(Boolean(businessSummary.transcriptome_path_exists)) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>metabolome_path_exists</span
+                  ><code>{{ String(Boolean(businessSummary.metabolome_path_exists)) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>metabolome_preview_available</span
+                  ><code>{{ String(Boolean(businessSummary.metabolome_preview_available)) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>background_literature_count</span
+                  ><code>{{ businessSummary.background_literature_count ?? '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>literature_card_count</span
+                  ><code>{{ businessSummary.literature_card_count ?? '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>citation_backend</span
+                  ><code>{{ businessSummary.citation_backend || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>llamaindex_available</span
+                  ><code>{{ String(Boolean(businessSummary.llamaindex_available)) }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>pipeline_log_path</span
+                  ><code>{{ businessSummary.pipeline_log_path || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>transcriptome_result_path</span
+                  ><code>{{ businessSummary.transcriptome_result_path || '-' }}</code>
+                </div>
+                <div class="diagnostic-item">
+                  <span>uploaded_file_count</span
+                  ><code>{{ businessSummary.uploaded_file_count ?? 0 }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>submitted_reference_genome_path</span
+                  ><code>{{
+                    businessSummary.submitted_reference_genome_path ||
+                    businessSummary.reference_genome_path ||
+                    '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>submitted_genome_gff_path</span
+                  ><code>{{
+                    businessSummary.submitted_genome_gff_path ||
+                    businessSummary.genome_gff_path ||
+                    '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>submitted_metabolome_path</span
+                  ><code>{{
+                    businessSummary.submitted_metabolome_path ||
+                    businessSummary.metabolome_path ||
+                    '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>submitted_sample_map_path</span
+                  ><code>{{
+                    businessSummary.submitted_sample_map_path ||
+                    businessSummary.sample_map_path ||
+                    '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>submitted_rnaseq_read_paths</span
+                  ><code>{{
+                    (businessSummary.submitted_rnaseq_read_paths || []).join(', ') || '-'
+                  }}</code>
+                </div>
+                <div class="diagnostic-item full-span">
+                  <span>upload_root</span
+                  ><code>{{
+                    businessSummary.submitted_upload_root || businessSummary.upload_root || '-'
+                  }}</code>
+                </div>
+              </div>
+            </a-collapse-panel>
+          </a-collapse>
         </div>
       </section>
     </div>
@@ -568,8 +557,7 @@ import { useAgentStore } from '@/stores/agent'
 import {
   DEFAULT_SMOKE_BREEDING_CONTEXT,
   REQUIRED_BREEDING_FIELDS,
-  downloadMarkdown,
-  downloadTsv
+  downloadMarkdown
 } from '@/utils/breedingWorkbench'
 
 const DEFAULT_FORM = { ...DEFAULT_SMOKE_BREEDING_CONTEXT }
@@ -627,6 +615,7 @@ const result = reactive({
   guardPassed: null,
   outputFiles: []
 })
+// 页面中的“路径缓存中心”,把不同上传入口的 serverPath 归一成后端业务字段
 const uploadedServerPaths = reactive({
   upload_root: '',
   uploaded_file_count: 0,
@@ -639,6 +628,7 @@ const uploadedServerPaths = reactive({
   sample_map_path: '',
   rnaseq_read_paths: []
 })
+// 上传文件对象
 const uploadState = reactive({
   reference_genome: [],
   genome_gff: [],
@@ -697,16 +687,7 @@ const fileInputRefs = new Map()
 // 它属于“页面解释当前 Run 进度”的步骤，不参与业务判断。
 const frontendPayload = computed(() => result.frontendPayload || null)
 const businessSummary = computed(() => frontendPayload.value?.summary || {})
-const literatureCards = computed(
-  () =>
-    frontendPayload.value?.literature_panel?.cards ||
-    frontendPayload.value?.literature_cards ||
-    result.frontendPayload?.literature_cards ||
-    []
-)
-const claimTraceRows = computed(
-  () => frontendPayload.value?.claim_trace_panel?.rows || result.frontendPayload?.claim_trace || []
-)
+const rawLlmOutputText = computed(() => frontendPayload.value?.debug_panel?.raw_llm_answer || '')
 const uploadRootVirtualPath = computed(() => `/breeding-workbench/${uploadBatchId.value}`)
 const uploadedFileList = computed(() =>
   Object.entries(uploadState)
@@ -729,7 +710,8 @@ const uploadedFileList = computed(() =>
         name: item.name,
         serverPath: item.serverPath,
         status: item.status || 'uploaded',
-        statusLabel: item.status === 'uploading' ? '上传中' : item.status === 'error' ? '上传失败' : '已上传'
+        statusLabel:
+          item.status === 'uploading' ? '上传中' : item.status === 'error' ? '上传失败' : '已上传'
       }))
     )
     .filter(Boolean)
@@ -766,17 +748,123 @@ const displayStatus = computed(() => {
   return { label: runStatus, tone: 'running' }
 })
 
-// 这个计算属性在结果区展示工具链时被调用。
-// 输入是 API 层整理好的 toolChain；输出是带中文标签的可视化链路。
-// 这里只展示结构化 tool call。
-const visibleToolChain = computed(() => {
-  return (result.visibleToolChain || result.toolChain || [])
-    .filter((item) => item?.name === 'omics_breeding_analysis_run')
-    .filter((item) => !item?.inferred)
-    .map((item) => ({
-      name: item.name,
-      label: TOOL_LABELS[item.name] || item.name
-    }))
+const executionSteps = computed(() => {
+  const summary = businessSummary.value || {}
+  const normalizedRunStatus = String(runDiagnostics.runStatus || result.status || '')
+    .trim()
+    .toLowerCase()
+  const isTerminalRun = TERMINAL_RESULT_STATUSES.has(normalizedRunStatus)
+  const isRunningState =
+    running.value ||
+    ['pending', 'running', 'processing', 'queued', 'streaming'].includes(normalizedRunStatus)
+  const normalizedTranscriptomeStatus = String(summary.transcriptome_pipeline_status || '')
+    .trim()
+    .toLowerCase()
+  const transcriptomeDone =
+    Boolean(summary.transcriptome_path_exists) ||
+    ['deg_available', 'deg_generated_from_fastq'].includes(summary.transcriptome_input_status) ||
+    ['completed', 'success', 'skipped_existing_deg'].includes(normalizedTranscriptomeStatus)
+  const transcriptomeFailed = ['failed', 'error'].includes(normalizedTranscriptomeStatus)
+  const transcriptomeRunning = ['running', 'started'].includes(normalizedTranscriptomeStatus)
+  const fastqUploaded = ['fastq_uploaded', 'uploaded_fastq_detected'].includes(
+    summary.transcriptome_input_status
+  )
+  const backgroundCount = Number(summary.background_literature_count || 0)
+  const citationReady = /\[(T\d+|M\d+|BG\d+|Guard)\]/.test(result.markdown || '')
+  const compactStatusLabel = (label) => label
+
+  const analysisStep = {
+    key: 'omics-analysis',
+    label: '多组学育种分析',
+    statusLabel: result.markdown
+      ? '已完成'
+      : isRunningState
+        ? '运行中'
+        : isTerminalRun
+          ? '失败'
+          : '未开始',
+    tone: result.markdown
+      ? 'success'
+      : isRunningState
+        ? 'running'
+        : isTerminalRun
+          ? 'failed'
+          : 'failed'
+  }
+
+  const transcriptomeStep = {
+    key: 'transcriptome-deg',
+    label: '转录组 DEG 固定流程',
+    statusLabel: transcriptomeDone
+      ? '已完成'
+      : transcriptomeFailed
+        ? '失败'
+        : transcriptomeRunning
+          ? '运行中'
+          : isRunningState
+            ? '等待中'
+            : fastqUploaded
+              ? '等待中'
+              : '未开始',
+    tone: transcriptomeDone
+      ? 'success'
+      : transcriptomeFailed
+        ? 'failed'
+        : transcriptomeRunning || isRunningState || fastqUploaded
+          ? 'running'
+          : 'failed'
+  }
+
+  let pubmedStatusLabel = '等待中'
+  let pubmedTone = 'running'
+  if (backgroundCount > 0) {
+    pubmedStatusLabel = '已检索'
+    pubmedTone = 'success'
+  } else if (isTerminalRun && ['failed', 'error', 'failed_guard'].includes(normalizedRunStatus)) {
+    pubmedStatusLabel = '失败'
+    pubmedTone = 'failed'
+  } else if (isRunningState) {
+    pubmedStatusLabel = summary.background_literature_status ? '处理中' : '等待中'
+    pubmedTone = 'running'
+  } else {
+    pubmedStatusLabel = '无文献'
+    pubmedTone = 'failed'
+  }
+
+  let citationStatusLabel = '等待中'
+  let citationTone = 'running'
+  if (citationReady) {
+    citationStatusLabel = '已生成'
+    citationTone = 'success'
+  } else if (isTerminalRun && ['failed', 'error', 'failed_guard'].includes(normalizedRunStatus)) {
+    citationStatusLabel = '失败'
+    citationTone = 'failed'
+  } else if (!isRunningState) {
+    citationStatusLabel = '未生成'
+    citationTone = 'failed'
+  }
+
+  const steps = [
+    analysisStep,
+    transcriptomeStep,
+    {
+      key: 'pubmed-background',
+      label: 'PubMed 文献检索',
+      statusLabel: pubmedStatusLabel,
+      tone: pubmedTone
+    },
+    {
+      key: 'citation-renderer',
+      label: 'Citation 溯源',
+      statusLabel: citationStatusLabel,
+      tone: citationTone
+    }
+  ]
+
+  return steps.map((item) => ({
+    ...item,
+    statusLabel: compactStatusLabel(item.statusLabel)
+  }))
 })
 
 const spinTip = computed(() => '智能体正在分析并调用工具，请稍候...')
@@ -824,7 +912,10 @@ const openFilePicker = (key) => {
   fileInputRefs.get(key)?.click()
 }
 
-const normalizeFileName = (file) => String(file?.name || '').trim().toLowerCase()
+const normalizeFileName = (file) =>
+  String(file?.name || '')
+    .trim()
+    .toLowerCase()
 
 const validateFilesForField = (key, files) => {
   const normalizedFiles = Array.from(files || []).filter(Boolean)
@@ -845,7 +936,8 @@ const validateFilesForField = (key, files) => {
       if (normalizeFileName(invalidFile) === 'read_counts.tsv') {
         return {
           files: [],
-          error: 'read_counts.tsv 不是 FASTQ reads，也不是最终 significant_de_genes.tsv，请改为上传 fq/*.fq.gz 或 fq 文件夹。'
+          error:
+            'read_counts.tsv 不是 FASTQ reads，也不是最终 significant_de_genes.tsv，请改为上传 fq/*.fq.gz 或 fq 文件夹。'
         }
       }
       return {
@@ -901,6 +993,7 @@ const ensureWorkspaceDirectoryPath = async (targetPath) => {
   return { virtualPath: currentPath, serverPath }
 }
 
+// 汇总到 uploadedServerPaths路径缓存中心,归一成后端业务字段
 const syncUploadedServerPaths = (key, entries) => {
   if (key === 'reference_genome') {
     uploadedServerPaths.reference_genome_path = entries[0]?.serverPath || ''
@@ -917,6 +1010,7 @@ const syncUploadedServerPaths = (key, entries) => {
   } else if (key === 'sample_map') {
     uploadedServerPaths.sample_map_path = entries[0]?.serverPath || ''
   } else if (key === 'rnaseq_reads') {
+    // FASTQ 会被整理成数组
     uploadedServerPaths.rnaseq_read_paths = entries.map((item) => item.serverPath).filter(Boolean)
   }
 
@@ -1084,6 +1178,7 @@ const buildTrait = () => {
 
 // 这个函数在真正发起 Agent Run 前被调用。
 // 输入来自页面表单；输出是发给 API 层的标准上下文字段。
+// 把: uploadedServerPaths、form、DEFAULT_FORM、DEFAULT_DATA_DIR 整理成后端能理解的上下文对象
 // 这些值描述的是“本次要让 Tool 读取哪些文件/文件名”，不是前端自己做组学分析。
 const buildSubmissionContext = () => {
   const hasUploadedBatch = Boolean(uploadedServerPaths.upload_root)
@@ -1095,6 +1190,7 @@ const buildSubmissionContext = () => {
 
   return {
     data_dir: uploadedServerPaths.upload_root || DEFAULT_DATA_DIR,
+    // 本次上传批次的根目录
     upload_root: uploadedServerPaths.upload_root || '',
     uploaded_file_count: uploadedServerPaths.uploaded_file_count || 0,
     reference_genome: (form.reference_genome || '').trim() || DEFAULT_FORM.reference_genome,
@@ -1104,7 +1200,8 @@ const buildSubmissionContext = () => {
     ),
     genome_gff: (form.genome_gff || '').trim() || DEFAULT_FORM.genome_gff,
     genome_gff_path: resolvePath(uploadedServerPaths.genome_gff_path, DEFAULT_FORM.genome_gff),
-    function_annotation: (form.function_annotation || '').trim() || DEFAULT_FORM.function_annotation,
+    function_annotation:
+      (form.function_annotation || '').trim() || DEFAULT_FORM.function_annotation,
     annotation_path: resolvePath(
       uploadedServerPaths.annotation_path,
       DEFAULT_FORM.function_annotation,
@@ -1116,10 +1213,9 @@ const buildSubmissionContext = () => {
       { optional: true }
     ),
     rnaseq_reads: (form.rnaseq_reads || '').trim() || DEFAULT_FORM.rnaseq_reads,
+    // 本次上传的 FASTQ 服务端路径数组
     rnaseq_read_paths:
-      uploadedServerPaths.rnaseq_read_paths.length > 0
-        ? uploadedServerPaths.rnaseq_read_paths
-        : [],
+      uploadedServerPaths.rnaseq_read_paths.length > 0 ? uploadedServerPaths.rnaseq_read_paths : [],
     sample_map: (form.sample_map || '').trim() || DEFAULT_FORM.sample_map,
     sample_map_path: resolvePath(uploadedServerPaths.sample_map_path, DEFAULT_FORM.sample_map),
     usage_doc: '',
@@ -1142,26 +1238,23 @@ const validateRequiredFields = () => {
   return `${missing.label}不能为空，请补充后再提交。`
 }
 
-// 这些下载函数在用户点击下载卡片时被调用。
-// 当前 TSV 下载是工作台演示用占位内容；真正的业务核心仍是右侧展示的最终 markdown 和工具结果。
-const downloadSignificantDeg = () => {
-  const content = ['gene_id\tstatus', 'candidate_gene_1\tdetected'].join('\n')
-  downloadTsv('significant_de_genes.tsv', content)
-}
-
-const downloadMetabolome = () => {
-  const content = ['compound\tannotation', 'trait_related_metabolite\tmetabolome_raw_3372.tsv'].join(
-    '\n'
-  )
-  downloadTsv('metabolome_raw_3372.tsv', content)
-}
-
 const downloadAdviceMarkdown = () => {
   if (!result.markdown) {
     message.warning('请先提交给智能体生成结果。')
     return
   }
   downloadMarkdown('breeding_advice.md', result.markdown)
+}
+
+const downloadRawLlmMarkdown = () => {
+  if (!rawLlmOutputText.value) {
+    message.warning('当前没有可下载的原始 LLM 输出。')
+    return
+  }
+  downloadMarkdown(
+    'breeding_raw_llm_output.md',
+    `# 原始 LLM 输出\n\n${rawLlmOutputText.value}`
+  )
 }
 
 // 这个函数在每轮轮询快照到达页面时被调用。
@@ -1656,7 +1749,60 @@ onMounted(async () => {
 }
 
 .chain-card {
-  margin-bottom: 16px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.result-shell-loading {
+  min-height: 240px;
+}
+
+.result-loading-inline {
+  min-height: 112px;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.result-loading-state {
+  min-height: 200px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.result-loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #7c3aed;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.result-loading-text {
+  margin: 0;
+}
+
+.raw-answer-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.debug-raw-answer {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.debug-raw-answer :deep(*) {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .chain-card-top {
@@ -1668,8 +1814,8 @@ onMounted(async () => {
 }
 
 .chain-title {
-  color: var(--gray-900);
-  font-size: 14px;
+  color: var(--gray-700);
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -1723,10 +1869,42 @@ onMounted(async () => {
   color: #c64646;
 }
 
-.chain-list {
-  display: flex;
-  flex-wrap: wrap;
+.execution-step-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.execution-step-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px solid rgba(20, 46, 34, 0.08);
+  border-radius: 14px;
+  background: color-mix(in srgb, white 92%, #1f9e86 8%);
+}
+
+.execution-step-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--gray-800);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.execution-step-item .status-pill {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  line-height: 1;
 }
 
 .soft-timeout-actions {
@@ -2080,6 +2258,16 @@ onMounted(async () => {
   .chain-card-top {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .execution-step-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .execution-step-list {
+    grid-template-columns: 1fr;
   }
 }
 </style>

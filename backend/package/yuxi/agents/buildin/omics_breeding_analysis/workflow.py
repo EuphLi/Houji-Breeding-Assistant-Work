@@ -15,6 +15,10 @@ from .citation_engine import build_citation_result
 from .presentation import build_frontend_payload
 from .literature_search import search_background_literature
 
+'''
+业务工作流编排层 / Evidence Pack 构建调度层 / LLM 与 renderer 上游
+'''
+
 """
 实现一条稳定的后端证据准备链路：
 Context / 旧 Tool 结果
@@ -27,7 +31,6 @@ omics_evidence_pack.json
 ↓
 summary / artifacts
 """
-
 
 '''
 workflow.py 的 Evidence Pack 准备层:
@@ -53,6 +56,8 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
     literature_records = evidence.get("literature") or []
     metabolome_context = evidence.get("metabolome_context") or []
     genome_context = evidence.get("genome_context") or []
+    annotation_evidence = evidence.get("annotation") or []
+    annotation_debug = ((evidence_pack.get("debug") or {}).get("annotation") or {})
     literature_debug = ((evidence_pack.get("debug") or {}).get("literature") or {})
     # 路径诊断的来源
     input_debug = ((evidence_pack.get("debug") or {}).get("inputs") or {})
@@ -60,6 +65,24 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
     # PubMed 背景文献摘要来自这里，由这一层统计，再被下游 citation_engine.py 用进正文。
     background_literature_records = evidence_pack.get("background_literature_records") or []
     background_literature_search = evidence_pack.get("background_literature_search") or {}
+    candidate_genes = [str(item).strip() for item in (targets.get("genes") or []) if str(item).strip()]
+    evidence_level = input_debug.get("evidence_level", "")
+    candidate_gene_fallback_used = bool(
+        evidence_level == "default_smoke_data"
+        and not candidate_genes
+        and smoke_debug.get("primary_gene_id")
+    )
+    if candidate_genes and transcriptome_records:
+        candidate_gene_source = (
+            "default_smoke_data" if evidence_level == "default_smoke_data" else "current_run_deg"
+        )
+        candidate_gene_source_path = input_debug.get("transcriptome_result_path", "")
+    elif candidate_gene_fallback_used:
+        candidate_gene_source = "default_smoke_data"
+        candidate_gene_source_path = smoke_debug.get("gene_ids_path", "")
+    else:
+        candidate_gene_source = "none"
+        candidate_gene_source_path = ""
 
     return {
         "trait": (evidence_pack.get("task") or {}).get("trait") or input_debug.get("trait", ""),
@@ -67,11 +90,16 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         or input_debug.get("question", ""),
         "data_source": input_debug.get("data_source", "") or input_debug.get("evidence_level", ""),
         "target_genes": targets.get("genes") or [],
+        "candidate_genes": candidate_genes,
+        "candidate_gene_source": candidate_gene_source,
+        "candidate_gene_source_path": candidate_gene_source_path,
+        "candidate_gene_fallback_used": candidate_gene_fallback_used,
         "trait_terms": targets.get("trait_terms") or [],
         "transcriptome_record_count": len(transcriptome_records),
         "literature_record_count": len(literature_records),
         "metabolome_context_count": len(metabolome_context),
         "genome_context_count": len(genome_context),
+        "annotation_evidence_count": len(annotation_evidence),
         "data_dir": input_debug.get("data_dir", ""),
         "must_include_population_validation": bool(
             guard_requirements.get("must_include_population_validation")
@@ -110,12 +138,27 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "genome_gff_path_exists": bool(input_debug.get("genome_gff_path_exists")),
         "annotation_path": input_debug.get("annotation_path", ""),
         "annotation_path_exists": bool(input_debug.get("annotation_path_exists")),
+        "annotated_transcriptome_path": annotation_debug.get("annotated_transcriptome_path", "")
+        or input_debug.get("annotated_transcriptome_path", ""),
+        "annotation_gene_match_count": int(annotation_debug.get("annotation_gene_match_count") or 0),
+        "annotation_unmatched_gene_count": int(
+            annotation_debug.get("annotation_unmatched_gene_count") or 0
+        ),
+        "annotation_duplicate_gene_id_count": int(
+            annotation_debug.get("annotation_duplicate_gene_id_count") or 0
+        ),
+        "annotation_isoform_count": int(annotation_debug.get("annotation_isoform_count") or 0),
+        "annotation_candidate_gene_ids": annotation_debug.get("annotation_candidate_gene_ids") or [],
+        "trait_relevant_annotation_gene_ids": annotation_debug.get("trait_relevant_annotation_gene_ids")
+        or [],
+        "pathway_summary": annotation_debug.get("pathway_summary") or [],
+        "pubmed_query_terms": annotation_debug.get("pubmed_query_terms") or [],
         "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
         "metabolome_preview_row_count": int(
             input_debug.get("metabolome_preview_row_count") or 0
         ),
         "metabolome_preview_truncated": bool(input_debug.get("metabolome_preview_truncated")),
-        "evidence_level": input_debug.get("evidence_level", ""),
+        "evidence_level": evidence_level,
         "smoke_context_primary_gene": smoke_debug.get("primary_gene_id", ""),
         "smoke_context_gene_count": int(smoke_debug.get("gene_count") or 0),
         "smoke_context_gene_ids_preview": smoke_debug.get("gene_ids_preview") or [],
@@ -157,6 +200,9 @@ def _build_warnings(evidence_pack: dict[str, Any]) -> list[str]:
         warnings.append(
             "当前输入中未提供可用的已验证文献证据记录，因此本次建议不包含 DOI 引用。"
         )
+
+    if summary.get("annotation_path_exists") and summary.get("annotation_gene_match_count") == 0:
+        warnings.append("已读取到功能注释文件，但未与当前 DEG 候选基因匹配到功能注释。")
 
     return warnings
 
@@ -462,11 +508,22 @@ def prepare_cited_guarded_omics_analysis_from_context(
         str(frontend_payload_path),
         str(final_result_path),
     ]
+    annotated_transcriptome_path = str(
+        (evidence_pack_result.get("summary") or {}).get("annotated_transcriptome_path") or ""
+    ).strip()
+    if annotated_transcriptome_path and annotated_transcriptome_path not in artifacts:
+        artifacts.insert(1, annotated_transcriptome_path)
 
-    # 把 Evidence Pack 阶段的 summary 和 Citation 阶段的 backend 合并起来
+    raw_answer_backend = str(citation_result.get("raw_answer_backend") or "").strip()
+    analysis_backend = "llm" if raw_answer_backend == "llm" else "rule_based"
+
+    # 把 Evidence Pack 阶段的 summary 和 Citation 阶段的 backend 合并起来。
+    # analysis_backend 表示综合分析文本来源；render_backend 表示最终 Markdown 渲染器。
     summary = {
         **evidence_pack_result["summary"],
-        "analysis_backend": citation_result["backend"],
+        "analysis_backend": analysis_backend,
+        "render_backend": citation_result["backend"],
+        "raw_answer_backend": raw_answer_backend,
         "citation_backend": citation_result.get("citation_backend", ""),
         "citation_disabled_reason": citation_result.get("disabled_reason", ""),
         "llamaindex_available": bool(citation_result.get("llamaindex_available")),
@@ -485,12 +542,16 @@ def prepare_cited_guarded_omics_analysis_from_context(
     final_result = {
         "status": final_status,
         "backend": citation_result["backend"],
+        "raw_answer_backend": citation_result.get("raw_answer_backend", ""),
         "llamaindex_available": citation_result["llamaindex_available"],
         "answer_markdown": answer_markdown,
+        "canonical_answer_markdown": citation_result.get("canonical_answer_markdown", ""),
+        "raw_llm_answer": citation_result.get("raw_llm_answer", ""),
         "citations": citation_result["citations"],
         "literature_cards": citation_result["literature_cards"],
         "claim_trace": citation_result["claim_trace"],
         "source_nodes": citation_result.get("source_nodes") or [],
+        "analysis_prompt": citation_result.get("analysis_prompt") or {},
         "guard_result": guard_result["guard_result"],
         "evidence_pack": evidence_pack,
         "evidence_pack_path": evidence_pack_result["evidence_pack_path"],

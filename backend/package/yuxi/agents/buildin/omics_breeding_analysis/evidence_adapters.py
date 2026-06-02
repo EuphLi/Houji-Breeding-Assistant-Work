@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import logging
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,9 @@ from .context import OmicsBreedingAnalysisContext
 from .evidence_pack import build_omics_evidence_pack
 
 """
+所属业务层次
+证据读取层 / 文件适配层 / 原始结果转结构化证据层
+
 此文件是 Evidence Pack 的文件适配层，完成把“文件路径和 TSV 内容”转成“标准 records”。
 完整链路是：
 chat_service.py
@@ -68,6 +72,112 @@ logger = logging.getLogger(__name__)
 DEFAULT_SMOKE_DATA_MARKER = "/smoke_test_minimal/"
 MAX_METABOLOME_PREVIEW_ROWS = 30
 MAX_METABOLOME_PREVIEW_CHARS = 10000
+TRAIT_RELATED_METABOLOME_KEYWORDS = (
+    "黄酮",
+    "flavonoid",
+    "phenylpropanoid",
+    "酚酸",
+    "苯丙烷",
+    "l-酪胺",
+    "tyramine",
+)
+
+ANNOTATION_FILE_SUFFIXES = {".txt", ".tsv", ".csv", ".gz"}
+ANNOTATION_FILENAME_KEYWORDS = (
+    "annotation",
+    "annot",
+    "function",
+    "functional",
+)
+GENE_ID_ALIASES = (
+    "gene_id",
+    "geneid",
+    "gene",
+    "gene_name",
+    "locus_id",
+    "locus",
+    "id",
+)
+TRANSCRIPT_ID_ALIASES = (
+    "mrna_id",
+    "mRNA_id",
+    "transcript_id",
+    "transcript_ids",
+    "isoform_id",
+    "mrna",
+    "transcript",
+)
+FUNCTION_FIELD_ALIASES = (
+    "NR_annotation",
+    "nr_annotation",
+    "annotation",
+    "description",
+    "function",
+    "functional_annotation",
+    "SwissProt_annotation",
+    "TrEMBL_annotation",
+    "KOG_defination",
+    "KOG_definition",
+    "KO",
+    "KEGG_gene_name",
+    "KEGG_Pathway",
+    "KeGG_Pathway",
+    "Pathway_defination",
+    "Pathway_definition",
+    "GO_IDs",
+    "GO_annotation",
+    "Pfam_Description",
+    "Pfam",
+    "InterPro_Description",
+    "InterPro",
+    "TF_id",
+)
+FUNCTION_FIELD_KEYWORDS = (
+    "annotation",
+    "description",
+    "function",
+    "swissprot",
+    "trembl",
+    "kegg",
+    "pathway",
+    "go",
+    "pfam",
+    "interpro",
+    "kog",
+    "ko",
+    "domain",
+    "tf",
+)
+PATHWAY_FIELD_KEYWORDS = ("pathway", "kegg", "ko")
+GO_FIELD_KEYWORDS = ("go",)
+DOMAIN_FIELD_KEYWORDS = ("pfam", "interpro", "domain", "kog", "tf")
+ANNOTATION_NOISE_SUBSTRINGS = (
+    "http",
+    "https",
+    "www",
+    "genome.jp",
+    "dbget-bin",
+    "www_bget",
+    "url 片段",
+)
+ANNOTATION_NOISE_EXACT = {
+    "[x]",
+    "x",
+    "-",
+    "--",
+    "na",
+    "n/a",
+    "none",
+}
+TRAIT_SYNONYM_MAP = {
+    "黄酮": ["flavonoid", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
+    "flavonoid": ["黄酮", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
+    "抗旱": ["drought", "abiotic stress", "water deficit", "dehydration"],
+    "drought": ["抗旱", "abiotic stress", "water deficit", "dehydration"],
+    "产量": ["yield", "grain yield", "grain weight", "panicle"],
+    "高产": ["yield", "grain yield", "grain weight", "panicle"],
+    "yield": ["产量", "高产", "grain yield", "grain weight", "panicle"],
+}
 
 # 负责读取 TSV 文件
 def _read_tsv(path: str | Path) -> list[dict[str, str]]:
@@ -85,6 +195,90 @@ def _read_tsv(path: str | Path) -> list[dict[str, str]]:
         # 每一行转成 dict
         reader = csv.DictReader(handle, delimiter="\t")
         return [dict(row) for row in reader]
+
+
+def _normalize_header_key(value: str) -> str:
+    text = str(value or "").replace("\ufeff", "").strip().lower()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _split_multi_value(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = []
+    for item in text.replace("；", ";").replace("，", ",").replace("|", ";").split(";"):
+        for sub_item in item.split(","):
+            normalized = sub_item.strip()
+            if normalized:
+                parts.append(normalized)
+    return _deduplicate_strings(parts)
+
+
+def _deduplicate_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _open_text(path: Path):
+    if path.suffix.lower() == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8-sig", errors="replace")
+    return path.open("r", encoding="utf-8-sig", errors="replace")
+
+
+def _detect_delimiter(path: Path) -> str:
+    if path.suffix.lower() == ".csv":
+        return ","
+    with _open_text(path) as handle:
+        sample = handle.readline()
+    return "," if sample.count(",") > sample.count("\t") else "\t"
+
+
+def _read_delimited(path: str | Path) -> list[dict[str, str]]:
+    file_path = Path(path)
+    if not file_path.exists() or not file_path.is_file():
+        return []
+    delimiter = _detect_delimiter(file_path)
+    with _open_text(file_path) as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        return [
+            {str(key or "").replace("\ufeff", "").strip(): str(value or "").strip() for key, value in row.items()}
+            for row in reader
+        ]
+
+
+def _find_header_name(headers: list[str], aliases: tuple[str, ...]) -> str:
+    normalized_aliases = {_normalize_header_key(alias) for alias in aliases}
+    for header in headers:
+        if _normalize_header_key(header) in normalized_aliases:
+            return header
+    for header in headers:
+        normalized = _normalize_header_key(header)
+        if any(alias and alias in normalized for alias in normalized_aliases):
+            return header
+    return ""
+
+
+def _is_function_annotation_column(header: str) -> bool:
+    normalized = _normalize_header_key(header)
+    alias_keys = {_normalize_header_key(alias) for alias in FUNCTION_FIELD_ALIASES}
+    return normalized in alias_keys or any(keyword in normalized for keyword in FUNCTION_FIELD_KEYWORDS)
+
+
+def _classify_annotation_fields(headers: list[str]) -> list[str]:
+    return [header for header in headers if _is_function_annotation_column(header)]
+
+
+def _field_matches_keywords(header: str, keywords: tuple[str, ...]) -> bool:
+    normalized = _normalize_header_key(header)
+    return any(keyword in normalized for keyword in keywords)
 
 
 def _normalized_row_lookup(row: dict[str, Any]) -> dict[str, Any]:
@@ -269,19 +463,55 @@ def _discover_context_input_paths(context: OmicsBreedingAnalysisContext) -> dict
     discovered["genome_gff_path"] = _pick_first(
         lambda path: path.name in {"genome.gff", "genome.gff3"}
     )
-    discovered["annotation_path"] = _pick_first(
-        lambda path: (
-            "annotation" in path.name.lower()
-            or path.name in {"smoke_gene_ids.txt", "xiaomi_T2T_Annotation.smoke_genes.txt"}
-        )
-        and path.suffix.lower() in {".txt", ".tsv"}
-    )
+    discovered["annotation_path"] = _discover_annotation_file(upload_files)
     discovered["rnaseq_read_paths"] = [
         str(path.resolve())
         for path in upload_files
         if path.name.lower().endswith((".fq", ".fastq", ".fq.gz", ".fastq.gz"))
     ]
     return discovered
+
+
+def _has_supported_annotation_suffix(path: Path) -> bool:
+    if path.suffix.lower() == ".gz":
+        return Path(path.stem).suffix.lower() in {".txt", ".tsv", ".csv"} or path.suffix.lower() in ANNOTATION_FILE_SUFFIXES
+    return path.suffix.lower() in ANNOTATION_FILE_SUFFIXES
+
+
+def _looks_like_annotation_filename(path: Path) -> bool:
+    name = path.name.lower()
+    return any(keyword in name for keyword in ANNOTATION_FILENAME_KEYWORDS)
+
+
+def _inspect_annotation_table(path: Path) -> dict[str, Any]:
+    rows = _read_delimited(path)
+    headers = list(rows[0].keys()) if rows else []
+    gene_column = _find_header_name(headers, GENE_ID_ALIASES)
+    transcript_column = _find_header_name(headers, TRANSCRIPT_ID_ALIASES)
+    annotation_columns = _classify_annotation_fields(headers)
+    return {
+        "rows": rows,
+        "headers": headers,
+        "gene_column": gene_column,
+        "transcript_column": transcript_column,
+        "annotation_columns": annotation_columns,
+    }
+
+
+def _discover_annotation_file(upload_files: list[Path]) -> str:
+    candidates = [
+        path
+        for path in upload_files
+        if _has_supported_annotation_suffix(path) and _looks_like_annotation_filename(path)
+    ]
+    for path in candidates:
+        try:
+            inspection = _inspect_annotation_table(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if inspection["gene_column"] and inspection["annotation_columns"]:
+            return str(path.resolve())
+    return ""
 
 
 def discover_context_input_paths(context: OmicsBreedingAnalysisContext) -> dict[str, Any]:
@@ -344,6 +574,112 @@ def _read_text_preview(
         "preview_rows": preview_rows,
         "row_count": len(preview_rows),
         "truncated": truncated,
+    }
+
+
+def _find_header_index(headers: list[str], aliases: tuple[str, ...]) -> int | None:
+    normalized_headers = [str(header or "").strip().lower() for header in headers]
+    for alias in aliases:
+        if alias in normalized_headers:
+            return normalized_headers.index(alias)
+    for index, header in enumerate(normalized_headers):
+        if any(alias in header for alias in aliases):
+            return index
+    return None
+
+
+def _is_significant_metabolite(row: dict[str, str]) -> bool:
+    record_type = _first_present(row, ["type", "Type", "regulation", "direction", "sig"]).lower()
+    if record_type in {"up", "down", "sig", "significant"}:
+        return True
+
+    fdr_raw = _first_present(row, ["fdr", "FDR", "padj", "qvalue", "q_value", "adj_p_val"])
+    log2fc_raw = _first_present(row, ["log2fc", "Log2FC", "logFC", "fold_change"])
+    if fdr_raw:
+        try:
+            fdr_value = float(fdr_raw)
+            log2fc_value = abs(float(log2fc_raw)) if log2fc_raw else 0.0
+            if fdr_value <= 0.05 and (log2fc_value >= 0.0):
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _metabolite_priority(row: dict[str, str]) -> tuple[int, int, float]:
+    row_text = " ".join(str(value or "") for value in row.values()).lower()
+    significant_rank = 0 if _is_significant_metabolite(row) else 1
+    trait_rank = 0 if any(keyword in row_text for keyword in TRAIT_RELATED_METABOLOME_KEYWORDS) else 1
+    fdr_value = 1.0
+    raw = _first_present(row, ["fdr", "FDR", "padj", "qvalue", "q_value", "adj_p_val"])
+    if raw:
+        try:
+            fdr_value = float(raw)
+        except ValueError:
+            pass
+    return (significant_rank, trait_rank, fdr_value)
+
+
+def _summarize_metabolome_preview(path: str | Path, preview_rows: list[str]) -> dict[str, Any]:
+    file_rows = _read_tsv(path)
+    total_records = len(file_rows)
+    if not file_rows and preview_rows:
+        headers = [cell.strip() for cell in preview_rows[0].split("\t")]
+        parsed_rows = [
+            [cell.strip() for cell in line.split("\t")]
+            for line in preview_rows[1:]
+            if str(line).strip()
+        ]
+        file_rows = [
+            {headers[index]: row[index] if index < len(row) else "" for index in range(len(headers))}
+            for row in parsed_rows
+        ]
+        total_records = len(file_rows)
+
+    significant_records = [row for row in file_rows if _is_significant_metabolite(row)]
+    ranked_rows = sorted(file_rows, key=_metabolite_priority)
+
+    top_metabolites: list[dict[str, str]] = []
+    if file_rows:
+        sample_headers = list(file_rows[0].keys())
+        id_index = _find_header_index(sample_headers, ("compound_id", "feature_id", "peak_id", "id"))
+        name_index = _find_header_index(sample_headers, ("metabolite", "compound_name", "compound", "name"))
+        class_index = _find_header_index(sample_headers, ("class", "subclass", "superclass", "category"))
+        log2fc_index = _find_header_index(sample_headers, ("log2fc", "logfc", "fold_change"))
+        fdr_index = _find_header_index(sample_headers, ("fdr", "padj", "qvalue", "adj_p_val"))
+        type_index = _find_header_index(sample_headers, ("type", "regulation", "direction", "sig"))
+
+        for row in ranked_rows[:5]:
+            keys = sample_headers
+            compound_id = row.get(keys[id_index], "") if id_index is not None and id_index < len(keys) else ""
+            metabolite_name = row.get(keys[name_index], "") if name_index is not None and name_index < len(keys) else ""
+            metabolite_class = row.get(keys[class_index], "") if class_index is not None and class_index < len(keys) else ""
+            log2fc = row.get(keys[log2fc_index], "") if log2fc_index is not None and log2fc_index < len(keys) else ""
+            fdr = row.get(keys[fdr_index], "") if fdr_index is not None and fdr_index < len(keys) else ""
+            record_type = row.get(keys[type_index], "") if type_index is not None and type_index < len(keys) else ""
+            top_metabolites.append(
+                {
+                    "compound_id": str(compound_id or "").strip(),
+                    "name": str(metabolite_name or "").strip() or str(compound_id or "").strip(),
+                    "class": str(metabolite_class or "").strip() or "未提供",
+                    "log2fc": str(log2fc or "").strip() or "N/A",
+                    "fdr": str(fdr or "").strip() or "N/A",
+                    "type": str(record_type or "").strip() or "unknown",
+                }
+            )
+
+    note = ""
+    top_text = " ".join(
+        f"{item.get('compound_id')} {item.get('name')} {item.get('class')}" for item in top_metabolites
+    ).lower()
+    if not any(keyword in top_text for keyword in TRAIT_RELATED_METABOLOME_KEYWORDS):
+        note = "未检测到典型黄酮骨架代谢物显著差异；当前代谢组线索主要来自苯丙烷相关分支代谢物或其他相关代谢物。"
+
+    return {
+        "total_record_count": total_records,
+        "significant_record_count": len(significant_records),
+        "top_metabolites": top_metabolites,
+        "trait_relevance_note": note,
     }
 
 
@@ -519,9 +855,393 @@ def read_transcriptome_records(path: str | Path) -> list[dict[str, Any]]:
             if value:
                 record[target_key] = str(value).strip()
 
+        annotation = _first_present(
+            row,
+            [
+                "annotation",
+                "description",
+                "functional_annotation",
+                "gene_annotation",
+                "product",
+                "gene_product",
+            ],
+        )
+        if annotation:
+            record["annotation"] = annotation
+
+        transcript_ids = _first_present(
+            row,
+            [
+                "transcript_ids",
+                "transcript_id",
+                "mRNA_id",
+                "mrna_id",
+                "isoform_id",
+                "mrna",
+                "transcript",
+            ],
+        )
+        if transcript_ids:
+            record["transcript_ids"] = transcript_ids
+
         records.append(record)
 
     return records
+
+
+def _trait_terms(trait: str) -> list[str]:
+    terms = _split_multi_value(trait)
+    normalized_trait = str(trait or "").lower()
+    for key, synonyms in TRAIT_SYNONYM_MAP.items():
+        if key.lower() in normalized_trait:
+            terms.extend(synonyms)
+    return _deduplicate_strings(terms)
+
+
+def _extract_annotation_terms(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        terms.extend(_split_multi_value(text))
+        for token in re_split_annotation_text(text):
+            if 3 <= len(token) <= 80:
+                terms.append(token)
+    cleaned_terms: list[str] = []
+    for term in _deduplicate_strings(terms):
+        cleaned = _clean_annotation_term(term)
+        if cleaned:
+            cleaned_terms.append(cleaned)
+    return cleaned_terms[:30]
+
+
+def _clean_annotation_term(term: Any) -> str:
+    text = str(term or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    if lower in ANNOTATION_NOISE_EXACT:
+        return ""
+    if any(noise in lower for noise in ANNOTATION_NOISE_SUBSTRINGS):
+        return ""
+    if "unnamed protein" in lower or "uncharacterized protein" in lower:
+        return ""
+    return text
+
+
+def re_split_annotation_text(text: str) -> list[str]:
+    separators = [";", "|", ",", "/", "(", ")", "[", "]"]
+    normalized = str(text or "")
+    for separator in separators:
+        normalized = normalized.replace(separator, "\t")
+    return [item.strip() for item in normalized.split("\t") if item.strip()]
+
+
+def _score_trait_relevance(
+    annotation_values: list[str],
+    *,
+    trait: str,
+) -> tuple[list[str], int, str]:
+    terms = _trait_terms(trait)
+    haystack = " ".join(annotation_values).lower()
+    matched = [term for term in terms if term and term.lower() in haystack]
+    score = len(matched)
+    if score >= 2:
+        level = "high"
+    elif score == 1:
+        level = "medium"
+    else:
+        level = "none"
+    return _deduplicate_strings(matched), score, level
+
+
+def _annotation_output_path(transcriptome_path: str | Path, context: OmicsBreedingAnalysisContext) -> Path:
+    path = Path(transcriptome_path)
+    if path.name:
+        return path.parent / "significant_de_genes.annotated.tsv"
+    output_parent = Path(context.evidence_pack_output_path).expanduser().resolve().parent
+    return output_parent / "transcriptome_deg" / "significant_de_genes.annotated.tsv"
+
+
+def _aggregate_annotation_records(
+    rows: list[dict[str, str]],
+    *,
+    gene_column: str,
+    transcript_column: str,
+    annotation_columns: list[str],
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        gene_id = str(row.get(gene_column) or "").strip()
+        if not gene_id:
+            continue
+        entry = grouped.setdefault(
+            gene_id,
+            {
+                "gene_id": gene_id,
+                "transcript_ids": [],
+                "records": [],
+                "annotation_fields": {column: [] for column in annotation_columns},
+            },
+        )
+        transcript_id = str(row.get(transcript_column) or "").strip() if transcript_column else ""
+        if transcript_id:
+            entry["transcript_ids"].extend(_split_multi_value(transcript_id))
+        entry["records"].append(row)
+        for column in annotation_columns:
+            value = str(row.get(column) or "").strip()
+            if value:
+                entry["annotation_fields"].setdefault(column, []).append(value)
+
+    for entry in grouped.values():
+        entry["transcript_ids"] = _deduplicate_strings(entry["transcript_ids"])
+        entry["annotation_fields"] = {
+            column: _deduplicate_strings(values)
+            for column, values in entry["annotation_fields"].items()
+            if values
+        }
+    return grouped
+
+
+def _matched_by(deg_record: dict[str, Any], annotation_entry: dict[str, Any]) -> tuple[str, int]:
+    deg_transcripts = set(_split_multi_value(deg_record.get("transcript_ids")))
+    annotation_transcripts = set(annotation_entry.get("transcript_ids") or [])
+    matched_transcripts = deg_transcripts.intersection(annotation_transcripts)
+    if deg_transcripts and annotation_transcripts and matched_transcripts:
+        return "gene_id_and_transcript_id", len(matched_transcripts)
+    return "gene_id", 0
+
+
+def _build_candidate_annotation(
+    deg_record: dict[str, Any],
+    annotation_entry: dict[str, Any],
+    *,
+    trait: str,
+) -> dict[str, Any]:
+    annotation_fields = {
+        column: " | ".join(values)
+        for column, values in (annotation_entry.get("annotation_fields") or {}).items()
+    }
+    all_values = list(annotation_fields.values())
+    pathway_terms = _extract_annotation_terms(
+        [
+            value
+            for column, value in annotation_fields.items()
+            if _field_matches_keywords(column, PATHWAY_FIELD_KEYWORDS)
+        ]
+    )
+    go_terms = _extract_annotation_terms(
+        [
+            value
+            for column, value in annotation_fields.items()
+            if _field_matches_keywords(column, GO_FIELD_KEYWORDS)
+        ]
+    )
+    domain_terms = _extract_annotation_terms(
+        [
+            value
+            for column, value in annotation_fields.items()
+            if _field_matches_keywords(column, DOMAIN_FIELD_KEYWORDS)
+        ]
+    )
+    normalized_function_terms = _extract_annotation_terms(all_values)
+    trait_relevance_terms, trait_relevance_score, trait_relevance_level = _score_trait_relevance(
+        all_values,
+        trait=trait,
+    )
+    matched_by, matched_transcript_count = _matched_by(deg_record, annotation_entry)
+    gene_id = str(deg_record.get("gene_id") or "").strip()
+    query_terms = _deduplicate_strings(
+        [
+            gene_id,
+            trait,
+            "Setaria italica",
+            *trait_relevance_terms,
+            *pathway_terms[:8],
+            *go_terms[:8],
+            *domain_terms[:8],
+            *normalized_function_terms[:8],
+        ]
+    )
+    return {
+        "gene_id": gene_id,
+        "transcript_ids": annotation_entry.get("transcript_ids") or [],
+        "matched_by": matched_by,
+        "annotation_fields": annotation_fields,
+        "normalized_function_terms": normalized_function_terms,
+        "pathway_terms": pathway_terms,
+        "go_terms": go_terms,
+        "domain_terms": domain_terms,
+        "trait_relevance_terms": trait_relevance_terms,
+        "trait_relevance_score": trait_relevance_score,
+        "trait_relevance_level": trait_relevance_level,
+        "matched_transcript_count": matched_transcript_count,
+        "gene_level_terms": _deduplicate_strings([gene_id, *normalized_function_terms[:8]]),
+        "trait_terms": _trait_terms(trait),
+        "pubmed_query_terms": query_terms,
+    }
+
+
+def _write_annotated_transcriptome(
+    transcriptome_path: str | Path,
+    output_path: Path,
+    *,
+    annotation_columns: list[str],
+    candidate_annotations_by_gene: dict[str, dict[str, Any]],
+) -> str:
+    rows = _read_delimited(transcriptome_path)
+    if not rows:
+        return ""
+    fieldnames = list(rows[0].keys())
+    append_columns = [column for column in annotation_columns if column not in fieldnames]
+    if "annotation_matched_by" not in fieldnames:
+        append_columns.append("annotation_matched_by")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[*fieldnames, *append_columns], delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            gene_id = _infer_gene_id(row)
+            candidate = candidate_annotations_by_gene.get(gene_id) or {}
+            merged = dict(row)
+            annotation_fields = candidate.get("annotation_fields") or {}
+            for column in annotation_columns:
+                if column not in fieldnames:
+                    merged[column] = str(annotation_fields.get(column) or "")
+            merged["annotation_matched_by"] = str(candidate.get("matched_by") or "unmatched")
+            writer.writerow(merged)
+    return str(output_path)
+
+
+def collect_annotation_evidence(
+    *,
+    context: OmicsBreedingAnalysisContext,
+    transcriptome_records: list[dict[str, Any]],
+    input_diagnostics: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    annotation_path = input_diagnostics.get("annotation_path", "")
+    annotation_exists = bool(input_diagnostics.get("annotation_path_exists"))
+    transcriptome_path = input_diagnostics.get("transcriptome_result_path", "")
+    base_metadata = {
+        "annotation_file": annotation_path,
+        "annotation_file_name": Path(annotation_path).name if annotation_path else "",
+        "annotation_path_exists": annotation_exists,
+        "annotated_transcriptome_path": "",
+        "annotation_gene_match_count": 0,
+        "annotation_unmatched_gene_count": len(transcriptome_records),
+        "annotation_duplicate_gene_id_count": 0,
+        "annotation_isoform_count": 0,
+        "annotation_candidate_gene_ids": [],
+        "trait_relevant_annotation_gene_ids": [],
+        "candidate_annotations": [],
+        "pathway_summary": [],
+        "pubmed_query_terms": [],
+        "recognized_columns": {},
+    }
+    if not annotation_exists or not transcriptome_records:
+        return [], base_metadata
+
+    inspection = _inspect_annotation_table(Path(annotation_path))
+    rows = inspection["rows"]
+    gene_column = inspection["gene_column"]
+    transcript_column = inspection["transcript_column"]
+    annotation_columns = inspection["annotation_columns"]
+    base_metadata["recognized_columns"] = {
+        "gene_id": gene_column,
+        "transcript_id": transcript_column,
+        "annotation_fields": annotation_columns,
+    }
+    if not rows or not gene_column or not annotation_columns:
+        return [], base_metadata
+
+    grouped = _aggregate_annotation_records(
+        rows,
+        gene_column=gene_column,
+        transcript_column=transcript_column,
+        annotation_columns=annotation_columns,
+    )
+    duplicate_gene_id_count = sum(1 for entry in grouped.values() if len(entry.get("records") or []) > 1)
+    isoform_count = sum(len(entry.get("transcript_ids") or []) for entry in grouped.values())
+    candidate_annotations: list[dict[str, Any]] = []
+    unmatched_gene_ids: list[str] = []
+    matched_transcript_count = 0
+    for deg_record in transcriptome_records:
+        gene_id = str(deg_record.get("gene_id") or "").strip()
+        annotation_entry = grouped.get(gene_id)
+        if not annotation_entry:
+            unmatched_gene_ids.append(gene_id)
+            continue
+        candidate = _build_candidate_annotation(
+            deg_record,
+            annotation_entry,
+            trait=context.trait,
+        )
+        matched_transcript_count += int(candidate.get("matched_transcript_count") or 0)
+        candidate_annotations.append(candidate)
+
+    candidate_annotations_by_gene = {
+        item["gene_id"]: item
+        for item in candidate_annotations
+        if item.get("gene_id")
+    }
+    annotated_path = ""
+    if transcriptome_path and Path(transcriptome_path).is_file():
+        annotated_path = _write_annotated_transcriptome(
+            transcriptome_path,
+            _annotation_output_path(transcriptome_path, context),
+            annotation_columns=annotation_columns,
+            candidate_annotations_by_gene=candidate_annotations_by_gene,
+        )
+
+    pathway_summary = _deduplicate_strings(
+        [
+            term
+            for item in candidate_annotations
+            for term in (item.get("pathway_terms") or [])
+        ]
+    )[:30]
+    pubmed_query_terms = _deduplicate_strings(
+        [
+            term
+            for item in candidate_annotations
+            for term in (item.get("pubmed_query_terms") or [])
+        ]
+    )[:80]
+    trait_relevant_gene_ids = [
+        item["gene_id"]
+        for item in candidate_annotations
+        if int(item.get("trait_relevance_score") or 0) > 0
+    ]
+    metadata = {
+        **base_metadata,
+        "annotated_transcriptome_path": annotated_path,
+        "annotation_gene_match_count": len(candidate_annotations),
+        "annotation_unmatched_gene_count": len(unmatched_gene_ids),
+        "annotation_duplicate_gene_id_count": duplicate_gene_id_count,
+        "annotation_isoform_count": isoform_count,
+        "annotation_matched_transcript_count": matched_transcript_count,
+        "annotation_candidate_gene_ids": [item["gene_id"] for item in candidate_annotations],
+        "annotation_unmatched_gene_ids": unmatched_gene_ids,
+        "trait_relevant_annotation_gene_ids": trait_relevant_gene_ids,
+        "candidate_annotations": candidate_annotations,
+        "pathway_summary": pathway_summary,
+        "pubmed_query_terms": pubmed_query_terms,
+    }
+    if not candidate_annotations:
+        return [], metadata
+    evidence = [
+        {
+            "evidence_id": "A1",
+            "source_file": annotation_path,
+            "summary": (
+                f"用户上传功能注释文件按 gene_id 与 DEG 结果关联，"
+                f"匹配 {len(candidate_annotations)} 个候选基因，未匹配 {len(unmatched_gene_ids)} 个。"
+            ),
+            "metadata": metadata,
+        }
+    ]
+    return evidence, metadata
 
 
 # 判断一条文献记录是否应该被过滤掉
@@ -690,6 +1410,15 @@ def build_omics_evidence_pack_from_context(
 
     # 从 Context 读取转录组文件路径
     transcriptome_records = read_transcriptome_records(transcriptome_path)
+    annotation_evidence, annotation_metadata = collect_annotation_evidence(
+        context=context,
+        transcriptome_records=transcriptome_records,
+        input_diagnostics=input_diagnostics,
+    )
+    if annotation_metadata.get("annotated_transcriptome_path"):
+        input_diagnostics["annotated_transcriptome_path"] = annotation_metadata[
+            "annotated_transcriptome_path"
+        ]
     # 从 Context 读取文献证据文件路径
     literature_diagnostics = collect_literature_evidence_diagnostics(
         literature_path,
@@ -706,19 +1435,27 @@ def build_omics_evidence_pack_from_context(
             max_rows=MAX_METABOLOME_PREVIEW_ROWS,
             max_chars=MAX_METABOLOME_PREVIEW_CHARS,
         )
+        metabolome_summary = _summarize_metabolome_preview(
+            input_diagnostics["metabolome_path"],
+            metabolome_preview["preview_rows"],
+        )
         metabolome_context.append(
             {
                 "evidence_id": "M1",
                 "summary": (
                     f"检测到代谢组结果文件：{input_diagnostics['metabolome_path']}。"
-                    "以下为提供给 LLM 的表格预览，属于输入上下文，不代表已完成专业代谢组统计分析。"
+                    "当前仅保留代谢组摘要和 Top 关键代谢物，不展示整张原始 TSV。"
                 ),
                 "source_file": input_diagnostics["metabolome_path"],
                 "preview_text": metabolome_preview["preview_text"],
                 "preview_rows": metabolome_preview["preview_rows"],
                 "preview_row_count": metabolome_preview["row_count"],
                 "truncated": metabolome_preview["truncated"],
-                "note": "metabolome table preview supplied to LLM for analysis",
+                "total_record_count": metabolome_summary["total_record_count"],
+                "significant_record_count": metabolome_summary["significant_record_count"],
+                "top_metabolites": metabolome_summary["top_metabolites"],
+                "trait_relevance_note": metabolome_summary["trait_relevance_note"],
+                "note": "metabolome summary supplied to canonical renderer",
             }
         )
         input_diagnostics["metabolome_preview_available"] = bool(
@@ -732,23 +1469,20 @@ def build_omics_evidence_pack_from_context(
         input_diagnostics["metabolome_preview_truncated"] = False
 
     genome_context: list[dict[str, Any]] = []
+    smoke_primary_gene = ""
     if input_diagnostics["evidence_level"] == "default_smoke_data" and smoke_gene_ids:
-        primary_gene = (
-            "Si9g037800"
-            if "Si9g037800" in smoke_gene_ids
-            else smoke_gene_ids[0]
-        )
+        smoke_primary_gene = smoke_gene_ids[0]
         preview = ", ".join(smoke_gene_ids[:6])
         genome_context.append(
             {
                 "evidence_id": "G1",
                 "summary": (
                     "当前默认 smoke 数据包围绕局部基因区域开展演示，"
-                    f"包含 {primary_gene} 在内的 {len(smoke_gene_ids)} 个基因。"
+                    f"包含 {smoke_primary_gene} 在内的 {len(smoke_gene_ids)} 个基因。"
                     "该信息仅作为上下文线索，不代表已经读取到真实 DEG 结果。"
                 ),
                 "source_file": str(smoke_gene_ids_path),
-                "primary_gene_id": primary_gene,
+                "primary_gene_id": smoke_primary_gene,
                 "gene_ids_preview": preview,
             }
         )
@@ -761,6 +1495,7 @@ def build_omics_evidence_pack_from_context(
         literature_records=literature_records,
         metabolome_context=metabolome_context,
         genome_context=genome_context,
+        annotation_evidence=annotation_evidence,
     )
     # 写入 debug 信息
     evidence_pack["debug"] = {
@@ -770,14 +1505,11 @@ def build_omics_evidence_pack_from_context(
             for key, value in literature_diagnostics.items()
             if key != "records"
         },
+        "annotation": annotation_metadata,
         "smoke_context": {
             "gene_ids_path": str(smoke_gene_ids_path),
             "gene_count": len(smoke_gene_ids),
-            "primary_gene_id": (
-                "Si9g037800"
-                if "Si9g037800" in smoke_gene_ids
-                else (smoke_gene_ids[0] if smoke_gene_ids else "")
-            ),
+            "primary_gene_id": smoke_primary_gene,
             "gene_ids_preview": smoke_gene_ids[:12],
         },
     }

@@ -4,11 +4,17 @@ import re
 from typing import Any
 
 """
+输出边界控制层 / 反过度推断层 / 反编造层
+
 基于 Evidence Pack 的 guard_requirements 检查最终回答是否越界
-answer_markdown
-+ evidence_pack.guard_requirements
-↓
-guard_result
+在数据流中的位置
+raw answer / canonical answer
+  ↓
+output_guard.py
+  ↓
+guarded answer / guard_result
+  ↓
+workflow.py / presentation.py / 前端
 """
 
 # 从回答中找DOI，若如果回答里出现 DOI，但不在 Evidence Pack 的 allowed_dois 中，就报错
@@ -38,7 +44,13 @@ FINAL_BREEDING_CONCLUSION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-QUOTE_LINE_PATTERN = re.compile(r"引用原文[:：]\s*(.+)")
+ANNOTATION_VALIDATED_PATTERN = re.compile(
+    r"(?:功能注释|annotation|A1).{0,30}(?:证明|证实|validated|confirmed).{0,30}(?:功能|调控|因果|trait|性状)|"
+    r"(?:基因功能|调控目标性状|直接因果).{0,30}(?:已由|由).{0,20}(?:功能注释|annotation|A1).{0,20}(?:证明|证实)",
+    re.IGNORECASE,
+)
+
+QUOTE_LINE_PATTERN = re.compile(r"引用原[文句][:：]\s*(.+)")
 
 
 def _as_list(value: Any) -> list[str]:
@@ -51,6 +63,30 @@ def _as_list(value: Any) -> list[str]:
 
 def _contains_any(text: str, terms: list[str]) -> bool:
     return any(term and term in text for term in terms)
+
+
+def _is_negated_completion_match(answer: str, match: re.Match[str] | None) -> bool:
+    if match is None:
+        return False
+    sentence_start = max(
+        answer.rfind("\n", 0, match.start()),
+        answer.rfind("。", 0, match.start()),
+        answer.rfind("！", 0, match.start()),
+        answer.rfind("?", 0, match.start()),
+        answer.rfind("？", 0, match.start()),
+    )
+    prefix = answer[sentence_start + 1:match.start()]
+    return any(
+        token in prefix
+        for token in ["不应", "不能", "不得", "不允许", "禁止", "不声称", "并非", "not "]
+    )
+
+
+def _has_positive_completion_claim(answer: str, pattern: re.Pattern[str]) -> bool:
+    for match in pattern.finditer(answer):
+        if not _is_negated_completion_match(answer, match):
+            return True
+    return False
 
 
 # 专门提取回答里的：引用原文：xxxx
@@ -115,15 +151,20 @@ def run_dynamic_output_guard(
         ),
         "has_unsupported_doi": bool(unsupported_dois),
         "has_unsupported_quoted_sentence": bool(unsupported_quotes),
-        "claims_population_validation_completed": bool(
-            POPULATION_VALIDATED_PATTERN.search(answer)
+        "claims_population_validation_completed": _has_positive_completion_claim(
+            answer, POPULATION_VALIDATED_PATTERN
         ),
-        "claims_wet_lab_completed": bool(WET_LAB_VALIDATED_PATTERN.search(answer)),
-        "claims_marker_development_completed": bool(
-            MARKER_COMPLETED_PATTERN.search(answer)
+        "claims_wet_lab_completed": _has_positive_completion_claim(
+            answer, WET_LAB_VALIDATED_PATTERN
         ),
-        "claims_final_breeding_conclusion": bool(
-            FINAL_BREEDING_CONCLUSION_PATTERN.search(answer)
+        "claims_marker_development_completed": _has_positive_completion_claim(
+            answer, MARKER_COMPLETED_PATTERN
+        ),
+        "claims_final_breeding_conclusion": _has_positive_completion_claim(
+            answer, FINAL_BREEDING_CONCLUSION_PATTERN
+        ),
+        "claims_annotation_as_validation": _has_positive_completion_claim(
+            answer, ANNOTATION_VALIDATED_PATTERN
         ),
     }
 
@@ -159,6 +200,9 @@ def run_dynamic_output_guard(
 
     if checks["claims_final_breeding_conclusion"]:
         errors.append("Answer appears to claim a final breeding conclusion.")
+
+    if checks["claims_annotation_as_validation"]:
+        errors.append("Answer appears to treat functional annotation as validation or causal proof.")
 
     if not doi_matches and allowed_dois:
         warnings.append("Evidence Pack contains DOI evidence, but answer does not cite DOI.")

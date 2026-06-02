@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,32 @@ _run_omics_breeding_analysis_impl()
 prepare_cited_guarded_omics_analysis_from_context()
     ↓
 workflow.py
+
+
+在线 2 中，是 worker 直接调用的育种分析工具入口，不等同于最终的 Evidence Pack 或 citation engine，更像一个工具适配器
+worker 传入 tool input
+  ↓
+omics_analysis.py 解析参数
+  ↓
+归一化路径和业务字段
+  ↓
+调用真正的 omics breeding workflow
+  ↓
+返回结构化结果
+
+
+是线 2 和线 3 的连接点，在线 3 中：
+接收用户上传路径
+  ↓
+确认是否有 FASTQ 输入
+  ↓
+确认是否有 sample_map_path / genome.fa / genome.gff
+  ↓
+决定是否调用固定转录组 pipeline
+  ↓
+收集 pipeline 输出
+  ↓
+把 significant_de_genes.tsv 路径写入 summary
 """
 
 # YuXi Tool 的输入合同，前端和 Agent 都可以根据它知道这个工具需要哪些参数
@@ -130,6 +157,7 @@ def _run_omics_breeding_analysis_impl(
     output_dir: str = "",
     use_llamaindex: bool = False,
     model: str = "",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """执行新多组学育种分析 workflow。
 
@@ -203,6 +231,17 @@ def _run_omics_breeding_analysis_impl(
         transcriptome_out_dir / "significant_de_genes.tsv" if transcriptome_out_dir else None
     )
 
+    def _emit_progress_summary(**progress_summary: Any) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                key: value
+                for key, value in progress_summary.items()
+                if value is not None
+            }
+        )
+
     def _ensure_pipeline_log(lines: list[str]) -> str:
         if transcriptome_out_dir is None:
             return ""
@@ -213,9 +252,25 @@ def _run_omics_breeding_analysis_impl(
 
     if normalized_transcriptome_path and Path(normalized_transcriptome_path).is_file():
         transcriptome_pipeline_status = "skipped_existing_deg"
+        _emit_progress_summary(
+            transcriptome_pipeline_status="completed",
+            transcriptome_result_path=normalized_transcriptome_path,
+            transcriptome_path_exists=True,
+            transcriptome_pipeline_attempted=False,
+            transcriptome_pipeline_output_dir=str(transcriptome_out_dir or ""),
+            pipeline_log_path=str((transcriptome_out_dir / "run.log") if transcriptome_out_dir else ""),
+        )
     elif transcriptome_existing_deg_path and transcriptome_existing_deg_path.is_file():
         normalized_transcriptome_path = str(transcriptome_existing_deg_path)
         transcriptome_pipeline_status = "skipped_existing_deg"
+        _emit_progress_summary(
+            transcriptome_pipeline_status="completed",
+            transcriptome_result_path=normalized_transcriptome_path,
+            transcriptome_path_exists=True,
+            transcriptome_pipeline_attempted=False,
+            transcriptome_pipeline_output_dir=str(transcriptome_out_dir or ""),
+            pipeline_log_path=str((transcriptome_out_dir / "run.log") if transcriptome_out_dir else ""),
+        )
     elif upload_root and normalized_rnaseq_read_paths:
         missing_pipeline_inputs: list[str] = []
         if not normalized_sample_map_path:
@@ -242,6 +297,13 @@ def _run_omics_breeding_analysis_impl(
             data_dir_path = Path(upload_root).expanduser().resolve()
             transcriptome_pipeline_output_dir = str(transcriptome_out_dir)
             fq_parent = Path(normalized_rnaseq_read_paths[0]).expanduser().resolve().parent
+            transcriptome_pipeline_attempted = True
+            _emit_progress_summary(
+                transcriptome_pipeline_status="running",
+                transcriptome_pipeline_attempted=True,
+                transcriptome_pipeline_output_dir=transcriptome_pipeline_output_dir,
+                pipeline_log_path=str((transcriptome_out_dir / "run.log") if transcriptome_out_dir else ""),
+            )
             try:
                 transcriptome_tool_result = breeding_transcriptome_deg.invoke(
                     {
@@ -310,6 +372,16 @@ def _run_omics_breeding_analysis_impl(
                                 f"error: {transcriptome_pipeline_error or 'unknown_error'}",
                             ]
                         )
+                _emit_progress_summary(
+                    transcriptome_pipeline_status=transcriptome_pipeline_status,
+                    transcriptome_result_path=normalized_transcriptome_path,
+                    transcriptome_path_exists=bool(normalized_transcriptome_path)
+                    and Path(normalized_transcriptome_path).is_file(),
+                    transcriptome_pipeline_attempted=transcriptome_pipeline_attempted,
+                    transcriptome_pipeline_output_dir=transcriptome_pipeline_output_dir,
+                    pipeline_log_path=pipeline_log_path,
+                    transcriptome_pipeline_error=transcriptome_pipeline_error,
+                )
             except Exception as exc:  # noqa: BLE001
                 transcriptome_pipeline_status = "failed"
                 transcriptome_pipeline_details = {"error": str(exc)}
@@ -320,6 +392,16 @@ def _run_omics_breeding_analysis_impl(
                         "Transcriptome pipeline raised an exception before completion.",
                         str(exc),
                     ]
+                )
+                _emit_progress_summary(
+                    transcriptome_pipeline_status="failed",
+                    transcriptome_result_path=normalized_transcriptome_path,
+                    transcriptome_path_exists=bool(normalized_transcriptome_path)
+                    and Path(normalized_transcriptome_path).is_file(),
+                    transcriptome_pipeline_attempted=True,
+                    transcriptome_pipeline_output_dir=transcriptome_pipeline_output_dir,
+                    pipeline_log_path=pipeline_log_path,
+                    transcriptome_pipeline_error=transcriptome_pipeline_error,
                 )
     elif normalized_transcriptome_path:
         transcriptome_pipeline_status = "failed"
@@ -441,8 +523,10 @@ def _run_omics_breeding_analysis_impl(
     return {
         "status": result["status"],
         "backend": result["backend"],
+        "raw_answer_backend": result.get("raw_answer_backend", ""),
         "llamaindex_available": result["llamaindex_available"],
         "answer_markdown": result["answer_markdown"],
+        "raw_llm_answer": result.get("raw_llm_answer", ""),
         "summary": result["summary"], # 运行诊断和数据来源信息
         "guard_result": result["guard_result"],
         "citations": result["citations"],
