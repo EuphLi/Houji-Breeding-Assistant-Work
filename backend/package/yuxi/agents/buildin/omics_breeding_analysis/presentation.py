@@ -93,6 +93,13 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
     literature_cards = _as_list(final_result.get("literature_cards"))
     claim_trace = _as_list(final_result.get("claim_trace"))
     artifacts = _as_list(final_result.get("artifacts"))
+    summary = final_result.get("summary") or {}
+    evidence_pack_path = str(
+        final_result.get("evidence_pack_path")
+        or summary.get("evidence_pack_path")
+        or summary.get("omics_evidence_pack_path")
+        or ""
+    ).strip()
 
     # citation_index 的作用是把 [T1] / [L1] 这种 citation id 映射回完整来源信息。
     # 这样 claim_trace_rows 里每一条 claim 都可以带上对应 source
@@ -148,7 +155,7 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
         "llamaindex_available": bool(final_result.get("llamaindex_available")),
         "answer_markdown": final_result.get("answer_markdown", ""),
         "raw_llm_answer": final_result.get("raw_llm_answer", ""),
-        "summary": final_result.get("summary") or {},
+        "summary": summary,
         "warnings": _as_list(final_result.get("warnings")),
         "literature_cards": literature_cards,
         "citation_panel": {
@@ -191,6 +198,9 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
         "debug_panel": {
             "raw_llm_answer": final_result.get("raw_llm_answer", ""),
             "analysis_prompt": final_result.get("analysis_prompt") or {},
+            "evidence_pack_path": evidence_pack_path,
+            "omics_evidence_pack_path": evidence_pack_path,
+            "evidence_pack_path_exists": bool(evidence_pack_path) and Path(evidence_pack_path).is_file(),
             "evidence_context": _build_debug_evidence_context(citations),
         },
     }

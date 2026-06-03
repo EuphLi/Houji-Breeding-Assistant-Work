@@ -65,6 +65,7 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
     # PubMed 背景文献摘要来自这里，由这一层统计，再被下游 citation_engine.py 用进正文。
     background_literature_records = evidence_pack.get("background_literature_records") or []
     background_literature_search = evidence_pack.get("background_literature_search") or {}
+    evidence_pack_path = str((evidence_pack.get("artifacts") or {}).get("evidence_pack_path") or "").strip()
     candidate_genes = [str(item).strip() for item in (targets.get("genes") or []) if str(item).strip()]
     evidence_level = input_debug.get("evidence_level", "")
     candidate_gene_fallback_used = bool(
@@ -209,11 +210,16 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "smoke_context_gene_count": int(smoke_debug.get("gene_count") or 0),
         "smoke_context_gene_ids_preview": smoke_debug.get("gene_ids_preview") or [],
         "background_literature_count": len(background_literature_records),
+        "background_literature_record_count": len(background_literature_records),
         "background_literature_backend": background_literature_search.get("backend", ""),
         "background_literature_status": background_literature_search.get("status", ""),
+        "background_literature_search_status": background_literature_search.get("status", ""),
         "background_literature_source": background_literature_search.get(
             "literature_source", ""
         ),
+        "evidence_pack_path": evidence_pack_path,
+        "omics_evidence_pack_path": evidence_pack_path,
+        "evidence_pack_path_exists": bool(evidence_pack_path) and Path(evidence_pack_path).is_file(),
     }
 
 
@@ -318,7 +324,9 @@ def prepare_omics_evidence_pack_from_context(
     # omics_analysis.py 构造 evidence_pack_output_path
     #   ↓
     # workflow.py 写出 omics_evidence_pack.json
-    output_path = write_evidence_pack(evidence_pack, context.evidence_pack_output_path)
+    output_path = Path(context.evidence_pack_output_path).expanduser().resolve()
+    evidence_pack.setdefault("artifacts", {})["evidence_pack_path"] = str(output_path)
+    write_evidence_pack(evidence_pack, output_path)
     # 生成 warnings
     warnings = _build_warnings(evidence_pack) # Evidence Pack 自身完整性 warning
     warnings.extend(background_literature.get("warnings") or []) # PubMed 背景检索 warning
@@ -360,7 +368,9 @@ def prepare_omics_evidence_pack_from_tool_results(
         transcriptome_tool_result=transcriptome_tool_result,
         literature_tool_result=literature_tool_result,
     )
-    output_path = write_evidence_pack(evidence_pack, context.evidence_pack_output_path)
+    output_path = Path(context.evidence_pack_output_path).expanduser().resolve()
+    evidence_pack.setdefault("artifacts", {})["evidence_pack_path"] = str(output_path)
+    write_evidence_pack(evidence_pack, output_path)
     warnings = _build_warnings(evidence_pack)
 
     return {
@@ -582,6 +592,16 @@ def prepare_cited_guarded_omics_analysis_from_context(
     # analysis_backend 表示综合分析文本来源；render_backend 表示最终 Markdown 渲染器。
     summary = {
         **evidence_pack_result["summary"],
+        "evidence_pack_path": evidence_pack_result["evidence_pack_path"],
+        "omics_evidence_pack_path": evidence_pack_result["evidence_pack_path"],
+        "evidence_pack_path_exists": Path(evidence_pack_result["evidence_pack_path"]).is_file(),
+        "background_literature_search_status": (
+            (evidence_pack.get("background_literature_search") or {}).get("status", "")
+        ),
+        "background_literature_record_count": len(
+            evidence_pack.get("background_literature_records") or []
+        ),
+        "literature_query_plan_count": len(evidence_pack.get("literature_query_plan") or []),
         "analysis_backend": analysis_backend,
         "render_backend": citation_result["backend"],
         "raw_answer_backend": raw_answer_backend,

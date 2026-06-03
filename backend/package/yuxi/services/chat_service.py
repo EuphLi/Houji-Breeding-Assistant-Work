@@ -196,7 +196,7 @@ def _build_direct_breeding_tool_input(
     rnaseq_read_paths = context.get("rnaseq_read_paths") or []
     if isinstance(rnaseq_read_paths, str):
         rnaseq_read_paths = [item.strip() for item in rnaseq_read_paths.split(",") if item.strip()]
-    normalized_upload_root = str(context.get("upload_root") or "").strip()
+    normalized_upload_root = str(context.get("upload_root") or context.get("data_dir") or "").strip()
 
     # 返回工具输入
     return {
@@ -237,7 +237,12 @@ def _build_direct_breeding_tool_input(
             default_filename="verified_literature_evidence.tsv",
         ),
         "evidence_pack_output_path": str(
-            context.get("evidence_pack_output_path") or f"{output_dir}/omics_evidence_pack.json"
+            context.get("evidence_pack_output_path")
+            or (
+                f"{normalized_upload_root}/omics_evidence_pack.json"
+                if normalized_upload_root
+                else f"{output_dir}/omics_evidence_pack.json"
+            )
         ).strip(),
         "output_dir": output_dir,
         "use_llamaindex": bool(context.get("use_llamaindex", True)),

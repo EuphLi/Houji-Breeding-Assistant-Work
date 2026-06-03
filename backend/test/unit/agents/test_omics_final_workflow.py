@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from yuxi.agents.buildin.omics_breeding_analysis import citation_engine as omics_citation_engine
+from yuxi.agents.buildin.omics_breeding_analysis import workflow as omics_workflow
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
 )
@@ -41,11 +43,13 @@ def test_prepare_cited_guarded_omics_analysis_from_context_writes_final_result(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        omics_workflow,
+        "search_background_literature",
         lambda **kwargs: {
             "status": "disabled_for_unit_test",
             "backend": "mock",
@@ -112,6 +116,11 @@ def test_prepare_cited_guarded_omics_analysis_from_context_writes_final_result(
     assert result["literature_cards"][0]["doi"] == "10.1234/real"
     assert result["summary"]["literature_path_exists"] is True
     assert result["summary"]["usable_literature_count"] == 1
+    assert result["summary"]["evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
+    assert result["summary"]["omics_evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
+    assert result["summary"]["evidence_pack_path_exists"] is True
+    assert result["summary"]["background_literature_search_status"] == "disabled_for_unit_test"
+    assert result["summary"]["background_literature_record_count"] == 0
 
     assert result["claim_trace"]
     assert any(item["citation_ids"] for item in result["claim_trace"])
@@ -126,18 +135,29 @@ def test_prepare_cited_guarded_omics_analysis_from_context_writes_final_result(
     assert loaded["status"] == "completed"
     assert loaded["guard_result"]["passed"] is True
     assert loaded["summary"]["target_genes"] == ["GeneA"]
+    assert loaded["summary"]["evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
     assert loaded["summary"]["analysis_backend"] == "rule_based"
     assert loaded["summary"]["render_backend"] == "canonical_renderer"
     assert loaded["summary"]["raw_answer_backend"] == "rule_fallback"
+    assert loaded["frontend_payload"]["debug_panel"]["evidence_pack_path"] == str(
+        tmp_path / "omics_evidence_pack.json"
+    )
+    evidence_pack = json.loads((tmp_path / "omics_evidence_pack.json").read_text(encoding="utf-8"))
+    assert evidence_pack["artifacts"]["evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
+    assert "background_literature_search" in evidence_pack
+    assert "background_literature_records" in evidence_pack
+    assert "literature_query_plan" in evidence_pack
 
 
 def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        omics_workflow,
+        "search_background_literature",
         lambda **kwargs: {
             "status": "disabled_for_unit_test",
             "backend": "mock",
@@ -195,6 +215,8 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     assert result["summary"]["annotated_transcriptome_read_by_llm"] is True
     assert result["summary"]["background_literature_count"] == 0
     assert result["summary"]["background_literature_status"] == "disabled_for_unit_test"
+    assert result["summary"]["background_literature_search_status"] == "disabled_for_unit_test"
+    assert result["summary"]["background_literature_record_count"] == 0
     assert result["summary"]["literature_query_plan_used_for_background_search"] is False
     assert "A1" in {item["citation_id"] for item in result["citations"]}
     assert "[A1] 基因功能注释证据" in result["answer_markdown"]
@@ -226,7 +248,8 @@ def test_prepare_cited_guarded_omics_analysis_from_context_uses_query_plan_for_b
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
 
@@ -265,7 +288,8 @@ def test_prepare_cited_guarded_omics_analysis_from_context_uses_query_plan_for_b
         }
 
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        omics_workflow,
+        "search_background_literature",
         fake_background_search,
     )
     deg_dir = tmp_path / "transcriptome_deg"
@@ -311,11 +335,13 @@ def test_prepare_cited_guarded_omics_analysis_from_context_without_deg_does_not_
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        omics_workflow,
+        "search_background_literature",
         lambda **kwargs: {
             "status": "disabled_for_unit_test",
             "backend": "mock",

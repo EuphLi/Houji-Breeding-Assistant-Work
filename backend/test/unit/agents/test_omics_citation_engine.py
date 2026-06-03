@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from yuxi.agents.buildin.omics_breeding_analysis import citation_engine as omics_citation_engine
 from yuxi.agents.buildin.omics_breeding_analysis.citation_engine import (
     CitationSource,
     build_breeding_analysis_prompt,
@@ -86,7 +87,8 @@ def test_build_literature_cards_from_sources():
 # 测试验证 fallback citation result 能生成用户正文和结构化 citation 结果。
 def test_build_citation_result_uses_rule_fallback_without_hardcoding(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     result = build_citation_result(
@@ -115,7 +117,8 @@ def test_build_citation_result_uses_rule_fallback_without_hardcoding(monkeypatch
 
 def test_build_citation_result_includes_a1_annotation_source_and_claim_trace(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = _sample_evidence_pack()
@@ -356,7 +359,8 @@ def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkey
             )
 
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda fully_specified_name: FakeModel(),
     )
 
@@ -510,7 +514,8 @@ def test_build_citation_result_for_flavonoid_trait_keeps_trait_specific_acceptan
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = {
@@ -603,7 +608,8 @@ def test_canonical_answer_body_uses_sentence_end_citations_and_hides_doi_before_
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = _sample_evidence_pack()
@@ -699,7 +705,8 @@ def test_claim_trace_excludes_source_index_and_only_tracks_real_claims():
 
 def test_empty_background_literature_does_not_emit_bg_citations(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     result = build_citation_result(
@@ -720,7 +727,8 @@ def test_empty_background_literature_does_not_emit_bg_citations(monkeypatch):
 
 def test_background_literature_without_quote_is_not_treated_as_bg_evidence(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = _sample_evidence_pack()
@@ -749,7 +757,8 @@ def test_background_literature_without_quote_is_not_treated_as_bg_evidence(monke
 
 def test_a1_source_index_prefers_nr_function_and_cleans_dirty_tokens(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = _sample_evidence_pack()
@@ -822,7 +831,8 @@ def test_a1_source_index_prefers_nr_function_and_cleans_dirty_tokens(monkeypatch
 
 def test_metabolome_summary_counts_type_and_significant_rows_without_na_prefix(monkeypatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     evidence_pack = _sample_evidence_pack()

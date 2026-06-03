@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from yuxi.agents.buildin.omics_breeding_analysis import citation_engine as omics_citation_engine
+from yuxi.agents.buildin.omics_breeding_analysis import workflow as omics_workflow
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
 )
@@ -23,7 +25,8 @@ from yuxi.agents.buildin.omics_breeding_analysis.workflow import (
 # 它确认后端最终结果里不仅有 final_result，还包含前端可直接消费的 frontend_payload。
 def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        omics_workflow,
+        "search_background_literature",
         lambda **kwargs: {
             "status": "disabled_for_unit_test",
             "backend": "mock",
@@ -34,7 +37,8 @@ def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.Mo
         },
     )
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda fully_specified_name: type(
             "FakeModel",
             (),
@@ -88,6 +92,8 @@ def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.Mo
     assert payload["answer_markdown"]
     assert payload["summary"]["analysis_backend"] == "llm"
     assert payload["summary"]["render_backend"] == "canonical_renderer"
+    assert payload["summary"]["evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
+    assert payload["summary"]["evidence_pack_path_exists"] is True
 
     assert payload["citation_panel"]["citation_count"] == 3
     assert any(
@@ -98,6 +104,11 @@ def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.Mo
     assert payload["guard_panel"]["passed"] is True
     assert payload["claim_trace_panel"]["row_count"] >= 1
     assert payload["artifact_panel"]["artifact_count"] >= 5
+    assert payload["debug_panel"]["evidence_pack_path"] == str(tmp_path / "omics_evidence_pack.json")
+    assert payload["debug_panel"]["omics_evidence_pack_path"] == str(
+        tmp_path / "omics_evidence_pack.json"
+    )
+    assert payload["debug_panel"]["evidence_pack_path_exists"] is True
 
     frontend_payload_path = tmp_path / "frontend_payload.json"
     final_result_path = tmp_path / "final_result.json"
@@ -108,6 +119,9 @@ def test_final_workflow_writes_frontend_payload(tmp_path, monkeypatch: pytest.Mo
     loaded_payload = json.loads(frontend_payload_path.read_text(encoding="utf-8"))
     assert loaded_payload["schema_version"] == "omics_frontend_payload.v1"
     assert loaded_payload["literature_panel"]["cards"][0]["doi"] == "10.1234/real"
+    assert loaded_payload["debug_panel"]["evidence_pack_path"] == str(
+        tmp_path / "omics_evidence_pack.json"
+    )
 
     loaded_final = json.loads(final_result_path.read_text(encoding="utf-8"))
     assert loaded_final["frontend_payload"]["schema_version"] == "omics_frontend_payload.v1"

@@ -11,6 +11,7 @@ from yuxi.agents.buildin.omics_breeding_analysis.literature_search import (
     build_literature_queries,
     search_background_literature,
 )
+from yuxi.agents.buildin.omics_breeding_analysis import citation_engine as omics_citation_engine
 from yuxi.agents.buildin.omics_breeding_analysis import workflow as omics_workflow
 from yuxi.agents.toolkits.breeding.omics_analysis import (
     _run_omics_breeding_analysis_impl,
@@ -27,7 +28,8 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -85,6 +87,12 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
     assert "注释：chalcone--flavonone isomerase" in source_index
     assert result["summary"]["literature_path_exists"] is True
     assert result["summary"]["usable_literature_count"] == 1
+    assert result["summary"]["evidence_pack_path"] == str(output_dir / "omics_evidence_pack.json")
+    assert result["summary"]["evidence_pack_path_exists"] is True
+    assert result["summary"]["resolved_evidence_pack_output_path"] == str(
+        output_dir / "omics_evidence_pack.json"
+    )
+    assert result["summary"]["evidence_pack_write_attempted"] is True
 
     assert (output_dir / "omics_evidence_pack.json").exists()
     assert (output_dir / "answer_markdown.md").exists()
@@ -102,6 +110,17 @@ def test_omics_breeding_analysis_tool_impl_writes_final_result(
     assert result["frontend_payload"]["claim_trace_panel"]["needs_citation_count"] == 0
     assert result["frontend_payload_path"]
     assert (output_dir / "frontend_payload.json").exists()
+    assert result["frontend_payload"]["debug_panel"]["evidence_pack_path"] == str(
+        output_dir / "omics_evidence_pack.json"
+    )
+    assert result["frontend_payload"]["debug_panel"]["resolved_evidence_pack_output_path"] == str(
+        output_dir / "omics_evidence_pack.json"
+    )
+    evidence_pack = json.loads((output_dir / "omics_evidence_pack.json").read_text(encoding="utf-8"))
+    assert evidence_pack["artifacts"]["evidence_pack_path"] == str(output_dir / "omics_evidence_pack.json")
+    assert "background_literature_search" in evidence_pack
+    assert "background_literature_records" in evidence_pack
+    assert "literature_query_plan" in evidence_pack
 
 
 # 测试验证 breeding/__init__.py 已经导入新模块，使 @tool 注册逻辑生效
@@ -313,7 +332,8 @@ def test_omics_breeding_analysis_tool_impl_keeps_raw_deg_and_generates_annotated
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -372,7 +392,8 @@ def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -428,6 +449,8 @@ def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
     assert result["summary"]["literature_query_plan_source"] == "annotated_transcriptome_pfam"
     assert result["summary"]["background_literature_count"] == 0
     assert result["summary"]["background_literature_status"] == "disabled_for_unit_test"
+    assert result["summary"]["background_literature_search_status"] == "disabled_for_unit_test"
+    assert result["summary"]["background_literature_record_count"] == 0
     assert result["summary"]["literature_query_plan_used_for_background_search"] is True
     assert "[BG1]" not in result["answer_markdown"]
     assert "待检索计划，不等同于 PubMed 文献证据" in result["analysis_prompt"]["user_prompt"]
@@ -449,6 +472,90 @@ def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
     )
 
 
+def test_omics_breeding_analysis_tool_defaults_evidence_pack_into_upload_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        omics_citation_engine,
+        "load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "queries": [],
+            "records": [],
+            "warnings": [],
+        },
+    )
+
+    upload_root = tmp_path / "workspace"
+    upload_root.mkdir(parents=True)
+    deg_dir = upload_root / "transcriptome_deg"
+    deg_dir.mkdir()
+    deg_path = deg_dir / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "GeneA\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+    annotation_path = upload_root / "annotation.tsv"
+    annotation_path.write_text(
+        "gene_id\ttranscript_id\tKEGG_Pathway\tInterPro_Description\n"
+        "GeneA\tGeneA.t1\tflavonoid biosynthesis\tchalcone isomerase domain\n",
+        encoding="utf-8",
+    )
+    metabolome_path = upload_root / "metabolome_raw_3372.tsv"
+    metabolome_path.write_text("compound\tvalue\nflavonoid_a\t12.5\n", encoding="utf-8")
+
+    output_dir = tmp_path / "tool_result_dir"
+
+    result = _run_omics_breeding_analysis_impl(
+        trait="抗旱",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path=str(metabolome_path),
+        annotation_path=str(annotation_path),
+        upload_root=str(upload_root),
+        evidence_pack_output_path="",
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    expected_path = upload_root / "omics_evidence_pack.json"
+    assert result["evidence_pack_path"] == str(expected_path)
+    assert result["summary"]["evidence_pack_path"] == str(expected_path)
+    assert result["summary"]["omics_evidence_pack_path"] == str(expected_path)
+    assert result["summary"]["evidence_pack_path_exists"] is True
+    assert result["summary"]["resolved_upload_root"] == str(upload_root)
+    assert result["summary"]["resolved_output_dir"] == str(output_dir.resolve())
+    assert result["summary"]["resolved_evidence_pack_output_path"] == str(expected_path)
+    assert result["summary"]["evidence_pack_write_attempted"] is True
+    assert result["frontend_payload"]["debug_panel"]["evidence_pack_path"] == str(expected_path)
+    assert result["frontend_payload"]["debug_panel"]["omics_evidence_pack_path"] == str(expected_path)
+    assert result["frontend_payload"]["debug_panel"]["resolved_upload_root"] == str(upload_root)
+    assert result["frontend_payload"]["debug_panel"]["resolved_evidence_pack_output_path"] == str(
+        expected_path
+    )
+    assert expected_path.exists()
+    evidence_pack = json.loads(expected_path.read_text(encoding="utf-8"))
+    assert evidence_pack["artifacts"]["evidence_pack_path"] == str(expected_path)
+    assert "background_literature_search" in evidence_pack
+    assert "background_literature_records" in evidence_pack
+    assert "literature_query_plan" in evidence_pack
+    assert evidence_pack["evidence"]["transcriptome"]
+    assert evidence_pack["evidence"]["metabolome_context"]
+    assert evidence_pack["evidence"]["annotation"]
+    assert (
+        evidence_pack["evidence"]["annotation"][0]["metadata"]["annotated_transcriptome_path"]
+        .endswith("significant_de_genes.annotated.tsv")
+    )
+
+
 def test_build_literature_queries_adds_trait_specific_pubmed_terms():
     flavonoid_queries = build_literature_queries("黄酮相关", ["GeneA"])
     drought_queries = build_literature_queries("抗旱相关", ["GeneA"])
@@ -463,7 +570,8 @@ def test_omics_breeding_analysis_tool_marks_fastq_pipeline_failure_without_missi
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -539,7 +647,8 @@ def test_omics_breeding_analysis_tool_runs_fixed_pipeline_into_upload_root(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -622,7 +731,8 @@ def test_omics_breeding_analysis_tool_emits_transcriptome_progress_snapshots(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -700,7 +810,8 @@ def test_omics_breeding_analysis_tool_emits_failed_transcriptome_progress_snapsh
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -777,7 +888,8 @@ def test_omics_breeding_analysis_tool_discovers_upload_root_inputs_before_pipeli
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -865,7 +977,8 @@ def test_omics_breeding_analysis_tool_creates_run_log_when_fastq_inputs_incomple
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -921,7 +1034,8 @@ def test_omics_breeding_analysis_tool_does_not_fallback_to_smoke_gene_when_curre
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -996,7 +1110,8 @@ def test_omics_breeding_analysis_tool_uses_only_current_run_deg_output_for_candi
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(
@@ -1063,7 +1178,8 @@ def test_omics_breeding_analysis_tool_does_not_read_historical_deg_outside_curre
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(
-        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        omics_citation_engine,
+        "load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
     monkeypatch.setattr(

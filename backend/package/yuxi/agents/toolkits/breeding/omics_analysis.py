@@ -164,10 +164,15 @@ def _run_omics_breeding_analysis_impl(
             return resolved.name
 
     # 决定 Evidence Pack 输出路径
+    normalized_upload_root = str(upload_root or "").strip()
     evidence_pack_path = (
         Path(evidence_pack_output_path).expanduser().resolve()
         if evidence_pack_output_path
-        else out_path / "omics_evidence_pack.json"
+        else (
+            Path(normalized_upload_root).expanduser().resolve() / "omics_evidence_pack.json"
+            if normalized_upload_root
+            else out_path / "omics_evidence_pack.json"
+        )
     )
 
     # 前端 / chat_service 传进来的原始路径，即用户提交了什么
@@ -189,7 +194,7 @@ def _run_omics_breeding_analysis_impl(
         annotation_path=submitted_annotation_path,
         sample_map_path=submitted_sample_map_path,
         rnaseq_read_paths=submitted_rnaseq_read_paths,
-        upload_root=str(upload_root or "").strip(),
+        upload_root=normalized_upload_root,
         uploaded_file_count=max(0, int(uploaded_file_count or 0)),
         literature_evidence_path=str(literature_evidence_path or "").strip(),
         evidence_pack_output_path=str(evidence_pack_path),
@@ -415,7 +420,7 @@ def _run_omics_breeding_analysis_impl(
         annotation_path=normalized_annotation_path,
         sample_map_path=normalized_sample_map_path,
         rnaseq_read_paths=normalized_rnaseq_read_paths,
-        upload_root=upload_root,
+        upload_root=normalized_upload_root,
         uploaded_file_count=max(0, int(uploaded_file_count or 0)),
         literature_evidence_path=literature_evidence_path,
         evidence_pack_output_path=str(evidence_pack_path),
@@ -439,14 +444,19 @@ def _run_omics_breeding_analysis_impl(
         summary["evidence_level"] = "omics_pipeline_generated"
     summary.update(
         {
+            "resolved_upload_root": normalized_upload_root,
+            "resolved_output_dir": str(out_path),
+            "resolved_evidence_pack_output_path": str(evidence_pack_path),
+            "evidence_pack_write_attempted": True,
+            "evidence_pack_path_exists": Path(result["evidence_pack_path"]).is_file(),
             "transcriptome_pipeline_status": transcriptome_pipeline_status,
             "transcriptome_result_path": normalized_transcriptome_path,
-            "upload_root": upload_root,
+            "upload_root": normalized_upload_root,
             "uploaded_file_count": max(0, int(uploaded_file_count or 0)),
             "sample_map_path": normalized_sample_map_path,
             "sample_map_path_exists": bool(normalized_sample_map_path) and Path(normalized_sample_map_path).is_file(),
             "rnaseq_read_count": len(normalized_rnaseq_read_paths or []),
-            "submitted_upload_root": upload_root,
+            "submitted_upload_root": normalized_upload_root,
             "submitted_transcriptome_result_path": transcriptome_result_path,
             "submitted_metabolome_path": submitted_metabolome_path,
             "submitted_reference_genome_path": submitted_reference_genome_path,
@@ -497,6 +507,17 @@ def _run_omics_breeding_analysis_impl(
     # 更新 frontend_payload 和磁盘结果
     frontend_payload = result.get("frontend_payload") or {}
     frontend_payload["summary"] = summary
+    debug_panel = frontend_payload.get("debug_panel") or {}
+    debug_panel.update(
+        {
+            "resolved_upload_root": normalized_upload_root,
+            "resolved_output_dir": str(out_path),
+            "resolved_evidence_pack_output_path": str(evidence_pack_path),
+            "evidence_pack_write_attempted": True,
+            "evidence_pack_path_exists": Path(result["evidence_pack_path"]).is_file(),
+        }
+    )
+    frontend_payload["debug_panel"] = debug_panel
     result["frontend_payload"] = frontend_payload
 
     if result.get("frontend_payload_path"):

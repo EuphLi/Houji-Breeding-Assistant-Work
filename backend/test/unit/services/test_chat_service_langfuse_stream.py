@@ -207,6 +207,24 @@ class _FakeSessionContextFactory:
         yield session
 
 
+def test_build_direct_breeding_tool_input_uses_workspace_for_default_evidence_pack_path():
+    payload = svc._build_direct_breeding_tool_input(
+        query="给出一些育种建议",
+        thread_id="thread-1",
+        meta={
+            "trait": "黄酮相关",
+            "question": "给出一些育种建议",
+            "breeding_context": {
+                "data_dir": "/tmp/workspace",
+            },
+        },
+        agent_config=None,
+    )
+
+    assert payload["upload_root"] == "/tmp/workspace"
+    assert payload["evidence_pack_output_path"] == "/tmp/workspace/omics_evidence_pack.json"
+
+
 async def _capture_stream_input_context(
     monkeypatch: pytest.MonkeyPatch,
     *,
