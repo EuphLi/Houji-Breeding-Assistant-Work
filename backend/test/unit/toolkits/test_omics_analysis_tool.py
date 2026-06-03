@@ -368,49 +368,36 @@ def test_omics_breeding_analysis_tool_impl_keeps_raw_deg_and_generates_annotated
     assert "GeneA\t1.8\t0.02\tGeneA\tchalcone isomerase" in result["analysis_prompt"]["user_prompt"]
 
 
-def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(
+def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
     monkeypatch, tmp_path
 ):
-    deg_path = tmp_path / "significant_de_genes.tsv"
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    deg_dir = tmp_path / "transcriptome_deg"
+    deg_dir.mkdir()
+    deg_path = deg_dir / "significant_de_genes.tsv"
     deg_path.write_text(
-        "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
-        "GeneA\t1.8\t0.003\t0.02\tchalcone--flavonone isomerase\n",
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "Si9g037800\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+    annotation_path = tmp_path / "annotation.tsv"
+    annotation_path.write_text(
+        "gene_id\tpfam\tKEGG_Pathway\n"
+        "Si9g037800\tChalcone-flavanone isomerase\tFlavonoid biosynthesis\n",
         encoding="utf-8",
     )
 
     output_dir = tmp_path / "omics_run"
 
-    def fake_background_search(**kwargs):
-        assert kwargs["trait"] == "黄酮"
-        assert kwargs["target_genes"] == ["GeneA"]
-        return {
-            "status": "completed",
-            "backend": "pubmed_search",
-            "literature_source": "pubmed_search",
-            "queries": ["Setaria italica 黄酮", "GeneA Setaria italica"],
-            "records": [
-                {
-                    "query": "Setaria italica 黄酮",
-                    "title": "Flavonoid pathway in foxtail millet",
-                    "doi": "10.1000/example",
-                    "pmid": "123456",
-                    "abstract": "Flavonoid accumulation changed in millet leaves.",
-                    "quoted_sentence": "Flavonoid accumulation changed in millet leaves.",
-                    "quote_scope": "abstract",
-                    "url": "https://pubmed.ncbi.nlm.nih.gov/123456/",
-                    "source": "PubMed",
-                }
-            ],
-            "warnings": [],
-        }
-
-    monkeypatch.setattr(omics_workflow, "search_background_literature", fake_background_search)
-
     result = _run_omics_breeding_analysis_impl(
-        trait="黄酮",
+        trait="黄酮相关",
         question="根据数据给出候选验证方案",
         transcriptome_result_path=str(deg_path),
         metabolome_path="",
+        annotation_path=str(annotation_path),
         literature_evidence_path="",
         evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
         output_dir=str(output_dir),
@@ -418,18 +405,27 @@ def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(
     )
 
     assert result["status"] == "completed"
-    assert result["summary"]["background_literature_count"] == 1
-    assert result["summary"]["background_literature_backend"] == "pubmed_search"
-    assert result["summary"]["background_literature_status"] == "completed"
-    assert result["summary"]["background_literature_source"] == "pubmed_search"
-    assert result["literature_cards"][0]["doi"] == "10.1000/example"
-    assert result["literature_cards"][0]["quote_scope"] == "abstract"
+    assert result["summary"]["pfam_literature_keywords"] == ["Chalcone-flavanone isomerase"]
+    assert result["summary"]["literature_query_plan_count"] > 0
+    assert result["summary"]["literature_query_plan_source"] == "annotated_transcriptome_pfam"
+    assert result["summary"]["background_literature_count"] == 0
+    assert result["summary"]["background_literature_status"] == "not_executed_phase_2a"
+    assert "[BG1]" not in result["answer_markdown"]
+    assert "待检索计划，不等同于 PubMed 文献证据" in result["analysis_prompt"]["user_prompt"]
 
     evidence_pack = json.loads((output_dir / "omics_evidence_pack.json").read_text(encoding="utf-8"))
-    assert evidence_pack["background_literature_records"][0]["doi"] == "10.1000/example"
-    assert (
-        evidence_pack["background_literature_records"][0]["quoted_sentence"]
-        == "Flavonoid accumulation changed in millet leaves."
+    assert evidence_pack["background_literature_records"] == []
+    assert evidence_pack["background_literature_search"]["status"] == "not_executed_phase_2a"
+    query_plan_path = deg_dir / "literature_query_plan.jsonl"
+    assert query_plan_path.exists()
+    query_plan_entries = [
+        json.loads(line)
+        for line in query_plan_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(
+        item["query"] == 'Setaria italica "Chalcone-flavanone isomerase" flavonoid'
+        for item in query_plan_entries
     )
 
 

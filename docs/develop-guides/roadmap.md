@@ -44,6 +44,7 @@
 - 收口育种工作台溯源展示：正式主回答统一改为 canonical cited answer renderer，主正文只保留句尾 citation id，DOI/PMID/引用原句/统计量统一下沉到文末“来源索引”；`raw_llm_answer` 降级到调试面板，`claim_trace` 仅跟踪真实业务 claim 并过滤标题、空行、来源索引和代谢组原始表格噪声，避免页面满屏 `uncited`。
 - 扩展育种工作台功能注释证据链路：用户上传的功能注释文件现在按 `annotation_path` 和动态表头识别进入 A1 证据，按 DEG `gene_id` 与可选 `transcript_id` 聚合匹配，生成 `significant_de_genes.annotated.tsv`、候选功能摘要、通路摘要和后续 PubMed query terms；LLM、来源索引和 `claim_trace` 只接收候选摘要，不直接展示整张原始注释表。
 - 接入育种工作台 `merge_gene_annotation.py`：将 DEG 结果与用户上传功能注释文件按 `gene_id` 合并生成独立的 `transcriptome_deg/significant_de_genes.annotated.tsv`，保留原始 `significant_de_genes.tsv` 不覆盖；A1 继续作为功能注释证据存在，同时在 summary/来源索引中记录 merge 统计，并把完整 merged annotated DEG 文件全文注入 LLM context 参与综合分析。
+- 补充育种工作台 Phase 2A 检索计划层：从 `significant_de_genes.annotated.tsv` 的 `pfam`/`Pfam_Description` 等字段提取 Pfam/domain 关键词，与物种、性状、通路和候选基因组合生成 `literature_query_plan.jsonl`；当前只生成待检索 query plan，不执行 PubMed 在线检索，也不把这些 query 视为文献证据。
 - 修复育种工作台正式上传链路的两处污染源：转录组固定流程在调用 `run_smoke_de_pipeline.sh` 前会先规范化 `sampleName_clientId.txt`，对显式 `group` 列额外生成旧脚本可识别的 `compatible_sampleName_clientId.txt`，把任意两组 group 映射到 `*_LM/*_JM` 并写入 `run.log/manifest`；正式 `omics_breeding_analysis_run` 不再在当前 run 缺少 DEG 证据时从 smoke/demo 默认基因回填 `Si9g037800`，候选基因仅来自本次 `upload_root/transcriptome_deg/significant_de_genes.tsv`。
 - 调整知识库思维导图后端结构：将思维导图路由文件重命名为知识库语义更明确的 router，并把文件列表整理、提示词构建、AI JSON 解析等纯逻辑下沉到知识库 utils。
 - 收敛知识库评估后端结构：将评估指标、单题评估、答案生成提示词和自动基准生成算法下沉到 `knowledge/eval`，`EvaluationService` 保留任务、文件和持久化编排职责。

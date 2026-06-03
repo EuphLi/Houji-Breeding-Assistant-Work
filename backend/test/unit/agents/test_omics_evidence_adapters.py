@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
 )
@@ -127,6 +129,9 @@ def test_annotation_evidence_adapter_parses_custom_uploaded_annotation_and_write
     assert metadata["annotation_merge_matched_count"] == 1
     assert metadata["annotation_merge_unmatched_count"] == 1
     assert metadata["annotation_merge_duplicate_count"] == 1
+    assert "Chalcone domain" in metadata["pfam_literature_keywords"]
+    assert metadata["literature_query_plan_count"] > 0
+    assert metadata["literature_query_plan_source"] == "annotated_transcriptome_pfam"
     assert metadata["annotation_gene_match_count"] == 1
     assert metadata["annotation_unmatched_gene_count"] == 1
     assert metadata["annotation_duplicate_gene_id_count"] == 1
@@ -143,6 +148,21 @@ def test_annotation_evidence_adapter_parses_custom_uploaded_annotation_and_write
     annotated_path = deg_dir / "significant_de_genes.annotated.tsv"
     assert metadata["annotated_transcriptome_path"] == str(annotated_path)
     assert annotated_path.exists()
+    query_plan_path = deg_dir / "literature_query_plan.jsonl"
+    assert metadata["literature_query_plan_path"] == str(query_plan_path)
+    assert query_plan_path.exists()
+    query_plan_entries = [
+        json.loads(line)
+        for line in query_plan_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(item["query_type"] == "species_pfam_trait" for item in query_plan_entries)
+    assert any(item["query_type"] == "species_pfam_pathway" for item in query_plan_entries)
+    assert any(item["query_type"] == "gene_pfam" for item in query_plan_entries)
+    assert any(
+        item["query"] == 'Setaria italica "Chalcone domain" flavonoid'
+        for item in query_plan_entries
+    )
     assert deg_path.read_text(encoding="utf-8").startswith("gene_id\ttranscript_ids\tlogFC")
     annotated_text = annotated_path.read_text(encoding="utf-8")
     assert annotated_text.splitlines()[0] == (
@@ -242,6 +262,7 @@ def test_annotation_evidence_adapter_degrades_without_annotation_file(tmp_path):
     assert pack["debug"]["annotation"]["annotation_path_exists"] is False
     assert pack["debug"]["annotation"]["annotation_merge_status"] == "skipped_missing_annotation"
     assert pack["debug"]["annotation"]["annotated_transcriptome_path"] == ""
+    assert pack["debug"]["annotation"]["literature_query_plan_count"] == 0
     assert pack["debug"]["annotation"]["candidate_annotations"] == []
 
 

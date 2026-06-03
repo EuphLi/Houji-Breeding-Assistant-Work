@@ -497,6 +497,11 @@ def _summarize_annotation_record(record: dict[str, Any]) -> dict[str, Any]:
         "candidate_annotations": list(record.get("candidate_annotations") or []),
         "pathway_summary": list(record.get("pathway_summary") or []),
         "pubmed_query_terms": list(record.get("pubmed_query_terms") or []),
+        "pfam_literature_keywords": list(record.get("pfam_literature_keywords") or []),
+        "literature_query_plan_path": _as_str(record.get("literature_query_plan_path")),
+        "literature_query_plan_count": int(record.get("literature_query_plan_count") or 0),
+        "literature_query_plan_source": _as_str(record.get("literature_query_plan_source")),
+        "literature_query_plan_preview": list(record.get("literature_query_plan_preview") or []),
     }
 
 
@@ -758,6 +763,15 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                         if annotation_summary["annotated_transcriptome_read_by_llm"]
                         else "未读取完整 merged annotated DEG 文件"
                     ),
+                    "Pfam 文献关键词："
+                    + (
+                        ", ".join(annotation_summary["pfam_literature_keywords"][:8])
+                        if annotation_summary["pfam_literature_keywords"]
+                        else "未提取到"
+                    ),
+                    f"literature_query_plan.jsonl：{annotation_summary['literature_query_plan_path'] or '未生成'}",
+                    f"query 数量：{annotation_summary['literature_query_plan_count']}",
+                    "query plan 证据角色：文献检索计划，不等同于文献证据",
                     f"匹配基因数量：{annotation_summary['match_count']}",
                     f"未匹配基因数量：{annotation_summary['unmatched_count']}",
                     f"多 isoform / transcript 记录数：{annotation_summary['isoform_count']}",
@@ -780,6 +794,8 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                     "关键通路 / GO / domain："
                     + ", ".join(str(item) for item in pathway_summary[:12])
                 )
+            for query in annotation_summary["literature_query_plan_preview"][:4]:
+                lines.append(f"待检索 query：{query}")
             lines.extend(
                 [
                     "证据角色：功能注释线索，不等同于功能验证",
@@ -1119,6 +1135,10 @@ def _format_annotation_context(evidence_pack: dict[str, Any]) -> str:
         f"- annotation_file={_as_str(metadata.get('annotation_file_name') or metadata.get('annotation_file')) or 'N/A'}",
         f"- annotation_gene_match_count={int(metadata.get('annotation_gene_match_count') or 0)}",
         f"- annotation_unmatched_gene_count={int(metadata.get('annotation_unmatched_gene_count') or 0)}",
+        f"- pfam_literature_keywords={', '.join(metadata.get('pfam_literature_keywords') or []) or 'N/A'}",
+        f"- literature_query_plan_count={int(metadata.get('literature_query_plan_count') or 0)}",
+        f"- literature_query_plan_path={_as_str(metadata.get('literature_query_plan_path')) or 'N/A'}",
+        "- literature_query_plan_role=待检索计划，不等同于 PubMed 文献证据",
     ]
     for candidate in list(metadata.get("candidate_annotations") or [])[:6]:
         if isinstance(candidate, dict):
@@ -1126,6 +1146,8 @@ def _format_annotation_context(evidence_pack: dict[str, Any]) -> str:
     pathway_summary = list(metadata.get("pathway_summary") or [])[:12]
     if pathway_summary:
         lines.append("- pathway_summary=" + ", ".join(str(item) for item in pathway_summary))
+    for query in list(metadata.get("literature_query_plan_preview") or [])[:4]:
+        lines.append(f"- query_plan_preview={query}")
     return "\n".join(lines)
 
 
@@ -1369,6 +1391,7 @@ def build_breeding_analysis_prompt(
             "不要声称已完成群体验证、湿实验验证或最终 KASP/CAPS 标记开发。",
             "如果没有真实组学输入文件，必须明确说明当前未读取到有效组学结果。",
             "PubMed 记录只能作为背景文献线索，不得表述成已完成的直接实验证据。",
+            "Pfam 文献 query plan 只是待检索计划，不是 DOI、PMID、引用原句或已验证文献证据。",
             "用户上传功能注释 A1 只能作为候选功能线索，不得表述成湿实验验证、直接因果证明或最终育种结论。",
             "正文可以引用 PMID/DOI 作为背景文献标识，但不得编造未提供的编号或原句。",
             "必须提出后续群体验证建议。",
@@ -1404,6 +1427,7 @@ def build_breeding_analysis_prompt(
             "- 如果 PubMed 有背景文献，请说明检索到的条数以及这些记录更像背景线索而非直接实验证据。",
             "- 文献依据部分必须引用真实 DOI 或 PMID、title，以及来自 literature_cards 的 quoted_sentence 或 abstract sentence。",
             "- 如果提供了 merged annotated DEG 文件全文，必须将其视为本轮综合分析输入的一部分。",
+            "- 如果提供了 literature query plan，只能把它表述成待检索计划，不能写成已获得的 PubMed 结果，也不能生成 BG citation。",
             "- 不要输出内部推理过程。",
         ]
     )

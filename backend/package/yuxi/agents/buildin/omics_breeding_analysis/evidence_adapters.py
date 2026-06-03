@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,8 @@ ANNOTATION_NOISE_EXACT = {
     "n/a",
     "none",
 }
+QUERY_PLAN_SPECIES_TERMS = ("Setaria italica", "foxtail millet")
+PFAM_FIELD_PRIORITY = ("pfam", "Pfam_Description", "PFAM", "pfam_description")
 TRAIT_SYNONYM_MAP = {
     "黄酮": ["flavonoid", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
     "flavonoid": ["黄酮", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
@@ -931,12 +934,49 @@ def _clean_annotation_term(term: Any) -> str:
     return text
 
 
+def _clean_pfam_keyword(term: Any) -> str:
+    text = _clean_annotation_term(term)
+    if not text:
+        return ""
+    lower = text.lower()
+    if lower in {"na", "n/a", "none", "-", "--"}:
+        return ""
+    if text in {"[X]", "X"}:
+        return ""
+    if lower.startswith(("http://", "https://", "www.")) or "://" in lower:
+        return ""
+    return text
+
+
 def re_split_annotation_text(text: str) -> list[str]:
     separators = [";", "|", ",", "/", "(", ")", "[", "]"]
     normalized = str(text or "")
     for separator in separators:
         normalized = normalized.replace(separator, "\t")
     return [item.strip() for item in normalized.split("\t") if item.strip()]
+
+
+def _extract_keywords_from_cell(value: Any) -> list[str]:
+    terms: list[str] = []
+    for item in _split_multi_value(value):
+        cleaned = _clean_pfam_keyword(item)
+        if cleaned:
+            terms.append(cleaned)
+    for item in re_split_annotation_text(str(value or "")):
+        cleaned = _clean_pfam_keyword(item)
+        if cleaned:
+            terms.append(cleaned)
+    return _deduplicate_strings(terms)
+
+
+def _query_trait_terms(trait: str) -> list[str]:
+    terms = _trait_terms(trait)
+    english_terms = [term for term in terms if any(ch.isascii() and ch.isalpha() for ch in term)]
+    preferred = english_terms[:3] or terms[:3]
+    if preferred:
+        return _deduplicate_strings(preferred)
+    raw = str(trait or "").strip()
+    return [raw] if raw else []
 
 
 def _score_trait_relevance(
@@ -963,6 +1003,14 @@ def _annotation_output_path(transcriptome_path: str | Path, context: OmicsBreedi
         return path.parent / "significant_de_genes.annotated.tsv"
     output_parent = Path(context.evidence_pack_output_path).expanduser().resolve().parent
     return output_parent / "transcriptome_deg" / "significant_de_genes.annotated.tsv"
+
+
+def _query_plan_output_path(annotated_transcriptome_path: str | Path, context: OmicsBreedingAnalysisContext) -> Path:
+    path = Path(annotated_transcriptome_path)
+    if path.name:
+        return path.parent / "literature_query_plan.jsonl"
+    output_parent = Path(context.evidence_pack_output_path).expanduser().resolve().parent
+    return output_parent / "transcriptome_deg" / "literature_query_plan.jsonl"
 
 
 def _aggregate_annotation_records(
@@ -1115,6 +1163,193 @@ def _write_annotated_transcriptome(
     return str(output_path)
 
 
+def _extract_pfam_keywords_from_annotated_rows(
+    rows: list[dict[str, str]],
+    *,
+    candidate_annotations: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    pfam_keywords_by_gene: dict[str, list[str]] = {}
+    for row in rows:
+        gene_id = _infer_gene_id(row)
+        if not gene_id:
+            continue
+        pfam_terms: list[str] = []
+        for field_name in PFAM_FIELD_PRIORITY:
+            if field_name not in row:
+                continue
+            pfam_terms = _extract_keywords_from_cell(row.get(field_name))
+            if pfam_terms:
+                break
+        if not pfam_terms and "domain_terms" in row:
+            pfam_terms = _extract_keywords_from_cell(row.get("domain_terms"))
+        if pfam_terms:
+            pfam_keywords_by_gene.setdefault(gene_id, []).extend(pfam_terms)
+
+    if not pfam_keywords_by_gene:
+        for candidate in candidate_annotations:
+            gene_id = str(candidate.get("gene_id") or "").strip()
+            if not gene_id:
+                continue
+            annotation_fields = candidate.get("annotation_fields") or {}
+            pfam_terms: list[str] = []
+            if isinstance(annotation_fields, dict):
+                for field_name in PFAM_FIELD_PRIORITY:
+                    if field_name not in annotation_fields:
+                        continue
+                    pfam_terms = _extract_keywords_from_cell(annotation_fields.get(field_name))
+                    if pfam_terms:
+                        break
+            if not pfam_terms:
+                pfam_terms = _deduplicate_strings(
+                    [
+                        cleaned
+                        for item in (candidate.get("domain_terms") or [])
+                        for cleaned in _extract_keywords_from_cell(item)
+                    ]
+                )
+            if pfam_terms:
+                pfam_keywords_by_gene.setdefault(gene_id, []).extend(pfam_terms)
+
+    normalized = {
+        gene_id: _deduplicate_strings(
+            [_clean_pfam_keyword(term) for term in values if _clean_pfam_keyword(term)]
+        )
+        for gene_id, values in pfam_keywords_by_gene.items()
+    }
+    normalized = {gene_id: values for gene_id, values in normalized.items() if values}
+    return (
+        _deduplicate_strings([term for values in normalized.values() for term in values]),
+        normalized,
+    )
+
+
+def _build_literature_query_plan(
+    *,
+    trait: str,
+    candidate_gene_ids: list[str],
+    pfam_keywords_by_gene: dict[str, list[str]],
+    pathway_terms: list[str],
+) -> list[dict[str, Any]]:
+    query_entries: list[dict[str, Any]] = []
+    seen_queries: set[str] = set()
+    counters = {"high": 0, "medium": 0, "low": 0, "fallback": 0}
+    trait_terms = _query_trait_terms(trait)
+
+    def add_entry(
+        *,
+        query_type: str,
+        priority: str,
+        query: str,
+        gene_id: str = "",
+        pfam_keyword: str = "",
+        old_keywords: list[str] | None = None,
+    ) -> None:
+        normalized_query = " ".join(str(query or "").split())
+        if not normalized_query or normalized_query in seen_queries:
+            return
+        seen_queries.add(normalized_query)
+        counters[priority] = counters.get(priority, 0) + 1
+        prefix = {
+            "high": "PFAM_HIGH",
+            "medium": "PFAM_MED",
+            "low": "PFAM_LOW",
+            "fallback": "PFAM_FALLBACK",
+        }[priority]
+        query_entries.append(
+            {
+                "query_id": f"{prefix}_{counters[priority]:03d}",
+                "query_type": query_type,
+                "priority": priority,
+                "gene_id": gene_id,
+                "pfam_keyword": pfam_keyword,
+                "old_keywords": old_keywords or [],
+                "query": normalized_query,
+                "source": "annotated_transcriptome_pfam",
+                "is_evidence": False,
+            }
+        )
+
+    for gene_id in candidate_gene_ids:
+        for pfam_keyword in pfam_keywords_by_gene.get(gene_id) or []:
+            for species in QUERY_PLAN_SPECIES_TERMS:
+                for trait_term in trait_terms[:2]:
+                    add_entry(
+                        query_type="species_pfam_trait",
+                        priority="high",
+                        gene_id=gene_id,
+                        pfam_keyword=pfam_keyword,
+                        old_keywords=[species, trait_term],
+                        query=f'{species} "{pfam_keyword}" {trait_term}',
+                    )
+                for pathway_term in pathway_terms[:4]:
+                    add_entry(
+                        query_type="species_pfam_pathway",
+                        priority="high",
+                        gene_id=gene_id,
+                        pfam_keyword=pfam_keyword,
+                        old_keywords=[species, pathway_term],
+                        query=f'{species} "{pfam_keyword}" "{pathway_term}"',
+                    )
+                add_entry(
+                    query_type="species_pfam",
+                    priority="medium",
+                    gene_id=gene_id,
+                    pfam_keyword=pfam_keyword,
+                    old_keywords=[species],
+                    query=f'{species} "{pfam_keyword}"',
+                )
+            for trait_term in trait_terms[:2]:
+                add_entry(
+                    query_type="pfam_trait",
+                    priority="medium",
+                    gene_id=gene_id,
+                    pfam_keyword=pfam_keyword,
+                    old_keywords=[trait_term],
+                    query=f'"{pfam_keyword}" {trait_term}',
+                )
+            add_entry(
+                query_type="gene_pfam",
+                priority="low",
+                gene_id=gene_id,
+                pfam_keyword=pfam_keyword,
+                old_keywords=[gene_id],
+                query=f'{gene_id} "{pfam_keyword}"',
+            )
+
+    for trait_term in trait_terms[:2]:
+        add_entry(
+            query_type="trait_only",
+            priority="fallback",
+            old_keywords=[trait_term],
+            query=trait_term,
+        )
+        for gene_id in candidate_gene_ids[:6]:
+            add_entry(
+                query_type="target_gene_trait",
+                priority="fallback",
+                gene_id=gene_id,
+                old_keywords=[gene_id, trait_term],
+                query=f"{gene_id} {trait_term}",
+            )
+        for species in QUERY_PLAN_SPECIES_TERMS:
+            add_entry(
+                query_type="species_trait",
+                priority="fallback",
+                old_keywords=[species, trait_term],
+                query=f"{species} {trait_term}",
+            )
+
+    return query_entries
+
+
+def _write_query_plan_jsonl(path: Path, query_plan: list[dict[str, Any]]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for entry in query_plan:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return str(path)
+
+
 def collect_annotation_evidence(
     *,
     context: OmicsBreedingAnalysisContext,
@@ -1138,6 +1373,11 @@ def collect_annotation_evidence(
         "annotation_merge_unmatched_count": 0,
         "annotation_merge_duplicate_count": 0,
         "annotated_transcriptome_read_by_llm": False,
+        "pfam_literature_keywords": [],
+        "literature_query_plan_path": "",
+        "literature_query_plan_count": 0,
+        "literature_query_plan_source": "annotated_transcriptome_pfam",
+        "literature_query_plan_preview": [],
         "annotation_gene_match_count": 0,
         "annotation_unmatched_gene_count": len(transcriptome_records),
         "annotation_duplicate_gene_id_count": 0,
@@ -1239,6 +1479,26 @@ def collect_annotation_evidence(
         for item in candidate_annotations
         if int(item.get("trait_relevance_score") or 0) > 0
     ]
+    query_plan_path = ""
+    query_plan: list[dict[str, Any]] = []
+    pfam_literature_keywords: list[str] = []
+    annotated_path = str(base_metadata.get("annotated_transcriptome_path") or "").strip()
+    if annotated_path and Path(annotated_path).is_file():
+        pfam_literature_keywords, pfam_keywords_by_gene = _extract_pfam_keywords_from_annotated_rows(
+            _read_delimited(annotated_path),
+            candidate_annotations=candidate_annotations,
+        )
+        query_plan = _build_literature_query_plan(
+            trait=context.trait,
+            candidate_gene_ids=[item["gene_id"] for item in candidate_annotations],
+            pfam_keywords_by_gene=pfam_keywords_by_gene,
+            pathway_terms=pathway_summary,
+        )
+        if query_plan:
+            query_plan_path = _write_query_plan_jsonl(
+                _query_plan_output_path(annotated_path, context),
+                query_plan,
+            )
     metadata = {
         **base_metadata,
         "annotation_gene_match_count": len(candidate_annotations),
@@ -1252,6 +1512,11 @@ def collect_annotation_evidence(
         "candidate_annotations": candidate_annotations,
         "pathway_summary": pathway_summary,
         "pubmed_query_terms": pubmed_query_terms,
+        "pfam_literature_keywords": pfam_literature_keywords,
+        "literature_query_plan_path": query_plan_path,
+        "literature_query_plan_count": len(query_plan),
+        "literature_query_plan_source": "annotated_transcriptome_pfam",
+        "literature_query_plan_preview": [item["query"] for item in query_plan[:8]],
     }
     if not candidate_annotations:
         return [], metadata
@@ -1264,7 +1529,8 @@ def collect_annotation_evidence(
                 f"生成 merged annotated DEG 文件 {Path(metadata['annotated_transcriptome_path']).name or 'N/A'}，"
                 f"merge total={metadata['annotation_merge_total_count']} matched={metadata['annotation_merge_matched_count']} "
                 f"unmatched={metadata['annotation_merge_unmatched_count']} duplicate={metadata['annotation_merge_duplicate_count']}；"
-                f"候选基因匹配 {len(candidate_annotations)} 个，未匹配 {len(unmatched_gene_ids)} 个。"
+                f"候选基因匹配 {len(candidate_annotations)} 个，未匹配 {len(unmatched_gene_ids)} 个；"
+                f"已生成 Pfam 文献检索计划 {metadata['literature_query_plan_count']} 条。"
             ),
             "metadata": metadata,
         }

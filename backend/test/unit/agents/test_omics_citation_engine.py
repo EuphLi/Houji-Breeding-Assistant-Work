@@ -137,6 +137,14 @@ def test_build_citation_result_includes_a1_annotation_source_and_claim_trace(mon
                 "annotation_merge_matched_count": 1,
                 "annotation_merge_unmatched_count": 0,
                 "annotation_merge_duplicate_count": 1,
+                "pfam_literature_keywords": ["chalcone isomerase"],
+                "literature_query_plan_path": "/tmp/transcriptome_deg/literature_query_plan.jsonl",
+                "literature_query_plan_count": 3,
+                "literature_query_plan_source": "annotated_transcriptome_pfam",
+                "literature_query_plan_preview": [
+                    'Setaria italica "chalcone isomerase" flavonoid',
+                    'foxtail millet "chalcone isomerase" "flavonoid biosynthesis"',
+                ],
                 "annotation_gene_match_count": 1,
                 "annotation_unmatched_gene_count": 0,
                 "annotation_duplicate_gene_id_count": 1,
@@ -191,6 +199,9 @@ def test_build_citation_result_includes_a1_annotation_source_and_claim_trace(mon
     assert "merged annotated DEG 文件：/tmp/transcriptome_deg/significant_de_genes.annotated.tsv" in source_index
     assert "merge 统计：total=1 matched=1 unmatched=0 duplicate=1" in source_index
     assert "LLM 分析输入：未读取完整 merged annotated DEG 文件" in source_index
+    assert "Pfam 文献关键词：chalcone isomerase" in source_index
+    assert "literature_query_plan.jsonl：/tmp/transcriptome_deg/literature_query_plan.jsonl" in source_index
+    assert "query plan 证据角色：文献检索计划，不等同于文献证据" in source_index
     assert "flavonoid biosynthesis" in source_index
     assert "chalcone isomerase" in source_index
     assert any("A1" in row["citation_ids"] for row in result["claim_trace"])
@@ -217,6 +228,13 @@ def test_build_breeding_analysis_prompt_includes_full_annotated_tsv(tmp_path):
                 "annotation_merge_matched_count": 1,
                 "annotation_merge_unmatched_count": 0,
                 "annotation_merge_duplicate_count": 0,
+                "pfam_literature_keywords": ["drought response protein"],
+                "literature_query_plan_path": str(tmp_path / "transcriptome_deg" / "literature_query_plan.jsonl"),
+                "literature_query_plan_count": 2,
+                "literature_query_plan_source": "annotated_transcriptome_pfam",
+                "literature_query_plan_preview": [
+                    'Setaria italica "drought response protein" drought'
+                ],
                 "annotation_gene_match_count": 1,
                 "annotation_unmatched_gene_count": 0,
                 "candidate_annotations": [
@@ -249,6 +267,8 @@ def test_build_breeding_analysis_prompt_includes_full_annotated_tsv(tmp_path):
     assert "drought response protein" in prompt["user_prompt"]
     assert "## 转录组-功能注释合并文件全文" in prompt["user_prompt"]
     assert "significant_de_genes.annotated.tsv" in prompt["user_prompt"]
+    assert "literature_query_plan_role=待检索计划，不等同于 PubMed 文献证据" in prompt["user_prompt"]
+    assert 'query_plan_preview=Setaria italica "drought response protein" drought' in prompt["user_prompt"]
     assert "gene_id\tlogFC\tannotation\tgene_id\tdescription" in prompt["user_prompt"]
     assert "GeneA\t1.8\tchalcone--flavonone isomerase\tGeneA\tdrought response protein" in prompt["user_prompt"]
     assert prompt["annotated_transcriptome_read_by_llm"] is True
@@ -293,6 +313,13 @@ def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkey
                 "annotation_merge_matched_count": 1,
                 "annotation_merge_unmatched_count": 0,
                 "annotation_merge_duplicate_count": 0,
+                "pfam_literature_keywords": ["drought response protein"],
+                "literature_query_plan_path": str(tmp_path / "transcriptome_deg" / "literature_query_plan.jsonl"),
+                "literature_query_plan_count": 2,
+                "literature_query_plan_source": "annotated_transcriptome_pfam",
+                "literature_query_plan_preview": [
+                    'Setaria italica "drought response protein" drought'
+                ],
                 "annotation_gene_match_count": 1,
                 "annotation_unmatched_gene_count": 0,
                 "candidate_annotations": [

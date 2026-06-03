@@ -184,16 +184,22 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     assert result["summary"]["annotation_merge_duplicate_count"] == 0
     assert result["summary"]["annotation_gene_match_count"] == 1
     assert result["summary"]["annotation_isoform_count"] == 1
+    assert result["summary"]["pfam_literature_keywords"] == ["chalcone isomerase domain"]
+    assert result["summary"]["literature_query_plan_count"] > 0
+    assert result["summary"]["literature_query_plan_source"] == "annotated_transcriptome_pfam"
     assert result["summary"]["annotated_transcriptome_path"].endswith(
         "transcriptome_deg/significant_de_genes.annotated.tsv"
     )
     assert result["summary"]["annotated_transcriptome_read_by_llm"] is True
+    assert result["summary"]["background_literature_count"] == 0
+    assert result["summary"]["background_literature_status"] == "not_executed_phase_2a"
     assert "A1" in {item["citation_id"] for item in result["citations"]}
     assert "[A1] 基因功能注释证据" in result["answer_markdown"]
     assert "系统已将转录组 DEG 结果与用户上传功能注释文件按 gene_id 合并" in result["answer_markdown"]
     assert "flavonoid biosynthesis" in result["answer_markdown"]
     assert any("A1" in row["citation_ids"] for row in result["claim_trace"])
     assert result["summary"]["annotated_transcriptome_path"] in result["artifacts"]
+    assert result["summary"]["literature_query_plan_path"] in result["artifacts"]
     assert result["evidence_pack"]["evidence"]["annotation"][0]["evidence_id"] == "A1"
     assert (
         result["evidence_pack"]["evidence"]["annotation"][0]["metadata"]["annotated_transcriptome_path"]
@@ -204,6 +210,7 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     assert "significant_de_genes.annotated.tsv" in prompt_text
     assert "gene_id\ttranscript_ids\tlogFC\tpvalue\tpadj\tgene_id\ttranscript_id\tKEGG_Pathway\tInterPro_Description" in prompt_text
     assert "GeneA\tGeneA.t1\t1.8\t0.003\t0.02\tGeneA\tGeneA.t1\tflavonoid biosynthesis\tchalcone isomerase domain" in prompt_text
+    assert "literature_query_plan_role=待检索计划，不等同于 PubMed 文献证据" in prompt_text
     debug_annotation = result["frontend_payload"]["debug_panel"]["evidence_context"][
         "annotation"
     ][0]

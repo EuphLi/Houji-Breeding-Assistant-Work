@@ -171,6 +171,14 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         or [],
         "pathway_summary": annotation_debug.get("pathway_summary") or [],
         "pubmed_query_terms": annotation_debug.get("pubmed_query_terms") or [],
+        "pfam_literature_keywords": annotation_debug.get("pfam_literature_keywords") or [],
+        "literature_query_plan_path": annotation_debug.get("literature_query_plan_path", ""),
+        "literature_query_plan_count": int(
+            annotation_debug.get("literature_query_plan_count") or 0
+        ),
+        "literature_query_plan_source": annotation_debug.get(
+            "literature_query_plan_source", ""
+        ),
         "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
         "metabolome_preview_row_count": int(
             input_debug.get("metabolome_preview_row_count") or 0
@@ -251,15 +259,16 @@ def prepare_omics_evidence_pack_from_context(
     """从 Context 中的文件路径构建 Evidence Pack，并写入输出路径。"""
     # 这一步进入 evidence_adapters.py。它负责从 context 读取，然后生成基础 Evidence Pack
     evidence_pack = build_omics_evidence_pack_from_context(context)
-    # 调用 PubMed 背景文献检索  PubMed 背景检索是在 Evidence Pack 准备阶段接入的
-    background_literature = search_background_literature(
-        trait=context.trait,
-        # 如果没有目标基因，它仍然可以根据 trait 做背景检索
-        target_genes=evidence_pack.get("targets", {}).get("genes") or [],
-    )
-    # 把 PubMed 结果塞回 Evidence Pack，下游 citation_engine.py 可以读取这些背景文献
-    evidence_pack["background_literature_records"] = background_literature.get("records") or []
-    # 写入检索状态
+    # Phase 2A 只生成 query plan，不执行 PubMed 在线检索。
+    background_literature = {
+        "status": "not_executed_phase_2a",
+        "backend": "",
+        "literature_source": "query_plan_only",
+        "queries": [],
+        "records": [],
+        "warnings": [],
+    }
+    evidence_pack["background_literature_records"] = []
     evidence_pack["background_literature_search"] = {
         "status": background_literature.get("status", ""),
         "backend": background_literature.get("backend", ""),
@@ -269,7 +278,7 @@ def prepare_omics_evidence_pack_from_context(
         "warnings": background_literature.get("warnings") or [],
     }
     guard_requirements = evidence_pack.setdefault("guard_requirements", {})
-    background_records = background_literature.get("records") or []
+    background_records = []
     allowed_dois = list(guard_requirements.get("allowed_dois") or [])
     allowed_quotes = list(guard_requirements.get("allowed_quoted_sentences") or [])
     for record in background_records:
@@ -533,6 +542,11 @@ def prepare_cited_guarded_omics_analysis_from_context(
         str(frontend_payload_path),
         str(final_result_path),
     ]
+    literature_query_plan_path = str(
+        (evidence_pack_result.get("summary") or {}).get("literature_query_plan_path") or ""
+    ).strip()
+    if literature_query_plan_path and literature_query_plan_path not in artifacts:
+        artifacts.insert(2, literature_query_plan_path)
     annotated_transcriptome_path = str(
         (evidence_pack_result.get("summary") or {}).get("annotated_transcriptome_path") or ""
     ).strip()
