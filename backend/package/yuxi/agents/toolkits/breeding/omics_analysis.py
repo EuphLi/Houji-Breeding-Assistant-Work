@@ -21,13 +21,14 @@ from yuxi.agents.toolkits.registry import tool
 """
 omics_analysis.py 本质上是：
 YuXi Tool 注册层 + 输入校验层 + workflow 包装层
-正式 YuXi Tool 入口如何定义、如何调用 workflow、如何返回前端需要的结果。
-chat_service.py
+把 direct route 传来的 tool_input 变成正式工作流可以消费的 context，再把工作流结果整理成前端能展示的 Tool 返回值
+
+chat_service.py  direct route
   _build_direct_breeding_tool_input()
     ↓
 omics_breeding_analysis_run.invoke({"input": tool_input})
     ↓
-omics_analysis.py
+omics_analysis.py  构造 OmicsBreedingAnalysisContext
   omics_breeding_analysis_run()
     ↓
 _run_omics_breeding_analysis_impl()
@@ -35,38 +36,25 @@ _run_omics_breeding_analysis_impl()
 prepare_cited_guarded_omics_analysis_from_context()
     ↓
 workflow.py
+  ↓
+返回 answer_markdown / frontend_payload / guard_result / citations
 
 
-在线 2 中，是 worker 直接调用的育种分析工具入口，不等同于最终的 Evidence Pack 或 citation engine，更像一个工具适配器
-worker 传入 tool input
-  ↓
-omics_analysis.py 解析参数
-  ↓
-归一化路径和业务字段
-  ↓
-调用真正的 omics breeding workflow
-  ↓
-返回结构化结果
+这个文件和线 2、线 3、线 4、线 5 的关系：
 
+线 2：chat_service.py 负责“为什么进入这个 Tool”
+线 4B：omics_analysis.py 负责“这个 Tool 如何包装输入、调用 workflow、返回结果”
+线 4：evidence_adapters.py / evidence_pack.py / workflow.py 负责“证据怎么构造”
+线 5：citation_engine.py / presentation.py / output_guard.py 负责“回答、citation、Guard、前端 payload 怎么生成”
+线 3：breeding_transcriptome_deg / tools.py 负责“FASTQ 怎么变成 significant_de_genes.tsv”
 
-是线 2 和线 3 的连接点，在线 3 中：
-接收用户上传路径
-  ↓
-确认是否有 FASTQ 输入
-  ↓
-确认是否有 sample_map_path / genome.fa / genome.gff
-  ↓
-决定是否调用固定转录组 pipeline
-  ↓
-收集 pipeline 输出
-  ↓
-把 significant_de_genes.tsv 路径写入 summary
+omics_analysis.py 横跨这些线，但它不是任何一条线的全部实现。它更像：工具总入口 + 工作流胶水层
 """
 
 # YuXi Tool 的输入合同，前端和 Agent 都可以根据它知道这个工具需要哪些参数
 class OmicsBreedingAnalysisRunInput(BaseModel):
     """多组学育种分析 Tool 输入参数。
-
+    给 YuXi Tool Registry 和调用方一个明确的输入 schema
     这个 Tool 是新 OmicsBreedingAnalysisAgent 的正式工具入口。
     它不复用旧建议逻辑，而是调用新的 Evidence Pack + Citation + Guard workflow。
     """
@@ -137,7 +125,7 @@ class OmicsBreedingAnalysisRunInput(BaseModel):
     )
 
 
-# 内部实现层。它把用户输入路径和问题整理成 OmicsBreedingAnalysisContext，然后调用已经完成的：prepare_cited_guarded_omics_analysis_from_context()
+# 工具总控包装层 / 内部实现层。它把用户输入路径和问题整理成 OmicsBreedingAnalysisContext，然后调用已经完成的：prepare_cited_guarded_omics_analysis_from_context()
 # 这个工具不会重新写 Evidence Pack / Citation / Guard 逻辑，只是包装现有 workflow
 def _run_omics_breeding_analysis_impl(
     *,
@@ -182,6 +170,7 @@ def _run_omics_breeding_analysis_impl(
         else out_path / "omics_evidence_pack.json"
     )
 
+    # 前端 / chat_service 传进来的原始路径，即用户提交了什么
     submitted_rnaseq_read_paths = list(rnaseq_read_paths or [])
     submitted_sample_map_path = str(sample_map_path or "").strip()
     submitted_reference_genome_path = str(reference_genome_path or "").strip()
@@ -189,6 +178,7 @@ def _run_omics_breeding_analysis_impl(
     submitted_annotation_path = str(annotation_path or "").strip()
     submitted_metabolome_path = str(metabolome_path or "").strip()
 
+    # 优先使用前端明确提交的路径；如果没有，则从 upload_root 自动发现。
     discovery_context = OmicsBreedingAnalysisContext(
         trait=trait,
         question=question,
@@ -207,6 +197,7 @@ def _run_omics_breeding_analysis_impl(
     )
     discovered_paths = discover_context_input_paths(discovery_context) if upload_root else {}
 
+    # 工具真正准备用于后续 workflow 的路径，即系统最终采用什么
     normalized_rnaseq_read_paths = submitted_rnaseq_read_paths or list(discovered_paths.get("rnaseq_read_paths") or [])
     normalized_sample_map_path = submitted_sample_map_path or str(discovered_paths.get("sample_map_path") or "").strip()
     normalized_reference_genome_path = submitted_reference_genome_path or str(
@@ -216,6 +207,7 @@ def _run_omics_breeding_analysis_impl(
     normalized_annotation_path = submitted_annotation_path or str(discovered_paths.get("annotation_path") or "").strip()
     normalized_metabolome_path = submitted_metabolome_path or str(discovered_paths.get("metabolome_path") or "").strip()
 
+    # 转录组 DEG 路径决策，这是线 4B 连接线 3 的地方
     transcriptome_pipeline_status = "not_enough_inputs"
     transcriptome_pipeline_details: dict[str, Any] = {}
     pipeline_log_path = ""
@@ -250,6 +242,7 @@ def _run_omics_breeding_analysis_impl(
         log_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return str(log_path)
 
+    # 情况一：已有 significant_de_genes.tsv，跳过 pipeline 不再运行 FASTQ→DEG
     if normalized_transcriptome_path and Path(normalized_transcriptome_path).is_file():
         transcriptome_pipeline_status = "skipped_existing_deg"
         _emit_progress_summary(
@@ -271,6 +264,7 @@ def _run_omics_breeding_analysis_impl(
             transcriptome_pipeline_output_dir=str(transcriptome_out_dir or ""),
             pipeline_log_path=str((transcriptome_out_dir / "run.log") if transcriptome_out_dir else ""),
         )
+    # 情况二：没有 DEG，但有 FASTQ，尝试运行固定转录组流程
     elif upload_root and normalized_rnaseq_read_paths:
         missing_pipeline_inputs: list[str] = []
         if not normalized_sample_map_path:
@@ -291,6 +285,7 @@ def _run_omics_breeding_analysis_impl(
                     *missing_pipeline_inputs,
                 ]
             )
+        # 情况三：输入齐全，调用已有的 breeding_transcriptome_deg 旧工具
         else:
             from yuxi.agents.toolkits.breeding.tools import breeding_transcriptome_deg
 
@@ -403,11 +398,13 @@ def _run_omics_breeding_analysis_impl(
                     pipeline_log_path=pipeline_log_path,
                     transcriptome_pipeline_error=transcriptome_pipeline_error,
                 )
+    # 情况四：给了 DEG 路径但文件不存在，会标记为失败状态。
+    # 后续仍会构造 context 并调用 workflow。workflow 和 evidence_adapters 会进一步给出证据缺失 warning
     elif normalized_transcriptome_path:
         transcriptome_pipeline_status = "failed"
         transcriptome_pipeline_error = "transcriptome_result_path_provided_but_not_found"
 
-    # 构造 OmicsBreedingAnalysisContext
+    # 构造 OmicsBreedingAnalysisContext，传给 workflow.py 的统一业务上下文
     context = OmicsBreedingAnalysisContext(
         trait=trait,
         question=question,
@@ -425,14 +422,17 @@ def _run_omics_breeding_analysis_impl(
         model=model,
     )
 
-    # 调用 workflow，是业务执行的真正入口
+    # omics_analysis.py 负责把 context 准备好后，调用 workflow，是业务执行的真正入口，进入 workflow 总装
     result = prepare_cited_guarded_omics_analysis_from_context(
         context=context,
         use_llamaindex=use_llamaindex,
         output_dir=out_path,
     )
 
+    # workflow 返回结果后，omics_analysis.py 会拿到 summary 补充：把 pipeline 状态写回结果
     summary = result.get("summary") or {}
+    # 如果 pipeline 成功生成 DEG，把数据来源从普通路径读取变成：omics_pipeline_generated
+    # 供前端分析此次的 DEG 是已有文件还是执行 FASTQ→DEG pipeline 新生成的
     if transcriptome_pipeline_status == "completed" and normalized_transcriptome_path:
         summary["transcriptome_input_status"] = "deg_generated_from_fastq"
         summary["data_source"] = "omics_pipeline_generated"
@@ -494,6 +494,7 @@ def _run_omics_breeding_analysis_impl(
         summary["transcriptome_pipeline_details"] = transcriptome_pipeline_details
     result["summary"] = summary
 
+    # 更新 frontend_payload 和磁盘结果
     frontend_payload = result.get("frontend_payload") or {}
     frontend_payload["summary"] = summary
     result["frontend_payload"] = frontend_payload
@@ -558,7 +559,7 @@ def omics_breeding_analysis_run(
 ) -> dict[str, Any]:
     """运行多组学育种分析，生成带 citation 和 Guard 的结构化结果。"""
 
-    # 把 input.xxx 拆出来，传给内部实现函数
+    # 把 input.xxx 拆出来，传给内部实现函数 _run_omics_breeding_analysis_impl()
     try:
         return _run_omics_breeding_analysis_impl(
             trait=input.trait,

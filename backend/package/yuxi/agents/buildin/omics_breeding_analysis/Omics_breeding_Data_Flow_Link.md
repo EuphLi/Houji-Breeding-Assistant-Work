@@ -77,6 +77,9 @@ omics_analysis.py
   返回 submitted_* / normalized_* / path_exists
 ```
 
+### 1.4 特别注意
+form 和 server_path 不是一回事、query 和 meta 不是一回事、当前支持真实上传，但仍保留 smoke fallback
+
 ---
 
 ## 2. 线 2：worker 如何强制走育种分析工具
@@ -111,34 +114,93 @@ worker 不走普通 Agent 对话
 ### 2.3 完整链路
 
 ```text
-chat_service.py
-  创建 run
-  保存 metadata:
-    source=breeding-workbench
-    preferred_tool=omics_breeding_analysis_run
-    breeding_context={...}
-        ↓
-run_worker.py
-  取出任务
-  恢复 metadata
-  判断：
-    source 是否为 breeding-workbench
-    preferred_tool 是否为 omics_breeding_analysis_run
-    是否 has_breeding_context
-        ↓
-  如果满足：
-    启用 Breeding workbench direct tool route
-        ↓
-  构造 tool_input
-        ↓
-  调用 omics_breeding_analysis_run
-        ↓
-omics_analysis.py
-  接收上下文
-  进入后续组学分析 workflow
+前端 breeding_workbench_api.js
+  createAgentRun(meta={
+    source: "breeding-workbench",
+    preferred_tool: "omics_breeding_analysis_run",
+    allowed_tools: ["omics_breeding_analysis_run"],
+    breeding_context: {...}
+  })
+  ↓
+后端创建 Agent Run
+  ↓
+run_worker.py 从队列取出 run
+  ↓
+run_worker.py 恢复 frontend_meta
+  ↓
+run_worker.py 调用 chat_service.stream_agent_chat(meta=meta)
+  ↓
+chat_service.py 判断是否 direct route
+  ↓
+命中 source + preferred_tool
+  ↓
+构造 tool_input
+  ↓
+直接执行 omics_breeding_analysis_run   
+接收上下文，进入后续组学分析 workflow
+  ↓
+保存 thread history
+  ↓
+返回 frontend_payload + answer_markdown
+  ↓
+前端轮询 history 并展示
+
+run_worker.py = 执行调度
+负责把前端 meta 原样恢复并传给 chat_service.py；
+负责“取任务、恢复 meta、调用 stream_agent_chat、写 run 状态”
+
+chat_service.py = 路由与执行入口
+才是真正决定是否绕过普通 Agent、直接执行 omics_breeding_analysis_run 的地方
+负责“判断 direct route、构造 tool_input、执行工具、保存 history、返回 finished”
+
+omics_analysis.py = 业务工具实现
 ```
 
+### 2.4 关键概念注意
+Run、input_payload、frontend_meta、breeding_context、direct route、frontend_payload
+
+#### 1. Run
+Run 是一次异步执行任务。 前端点击一次“提交给智能体”，后端就创建一个 Run。
+Thread = 对话容器 、Run = 某次执行 、History = Thread 下保存的消息 、Event = Run 执行过程中的状态流
+
+#### 2. input_payload
+run.input_payload 是创建 Run 时保存的完整输入。
+里面包括：
+query、config 、agent_id 、user_id 、request_id 、meta
+其中 meta 是育种工作台最关键的业务上下文。
+
+#### 3. frontend_meta
+frontend_meta = payload.get("meta") or {}。
+它来自前端：
+source、trait、question、breeding_context、allowed_tools、preferred_tool
+如果这个字段丢了，后端就退回普通 Agent 逻辑。
+
+#### 4. breeding_context
+这是用户上传路径和页面输入的集合。
+最终会变成：
+reference_genome_path 、genome_gff_path 、annotation_path 、rnaseq_read_paths
+sample_map_path 、metabolome_path 、literature_evidence_path
+这些字段在 chat_service.py 里被 _build_direct_breeding_tool_input() 转成 Tool 入参。
+
+#### 5. direct route
+当前项目最重要的控制机制：
+source == "breeding-workbench"
+preferred_tool == "omics_breeding_analysis_run"
+命中后：
+不等 LLM 选工具； 不走普通 Agent 自由 tool call； 直接执行正式育种分析工具。
+仍然嵌在 YuXi 的 Run / Thread / History / AgentConfig 体系 和 YuXi Agent Run 框架内 中，
+实现了一个受控 direct tool route，大模型主要参与后续证据整合和建议表达，固定生信流程和证据读取不交给模型自由决定。
+
+#### 6. frontend_payload
+这是后端 Tool 返回给前端的结构化展示数据。
+它被保存进 history 的 metadata 中：
+tool message metadata.frontend_payload
+assistant final message metadata.frontend_payload
+
+前端再从 history 中解析它，展示：
+summary 、citations 、literature_cards 、claim_trace 、guard_result 、answer_markdown 、debug_panel
 ---
+
 
 ## 3. 线 3：FASTQ → DEG 固定转录组流程
 
@@ -265,6 +327,20 @@ metabolome_raw_3372.tsv
 
 ```text
 把各种异构输入文件统一整理成大模型和 citation renderer 能使用的结构化证据。
+把真实文件路径和文件内容
+  ↓
+转成结构化 evidence records
+  ↓
+统一打包成 omics_evidence_pack.json
+
+evidence_adapters.py
+  负责读文件、解析字段、生成 transcriptome_records / metabolome_context / annotation_evidence / literature_records
+
+evidence_pack.py
+  负责定义 Evidence Pack 的统一 JSON 结构，并生成 guard_requirements
+
+workflow.py
+  负责调度 Evidence Pack 构建、补充 PubMed 背景文献、写出 omics_evidence_pack.json，并把结果继续送往 citation / guard / frontend_payload
 ```
 
 ### 4.4 T1 转录组证据流
@@ -415,6 +491,69 @@ Guard 的业务含义：
 ```text
 声明哪些事情不能被当前证据支持。
 ```
+
+### 4.8 完整数据流
+
+```text
+假设用户提交：
+
+trait = 黄酮相关
+question = 给出一些育种建议
+transcriptome_result_path = /.../significant_de_genes.tsv
+metabolome_path = /.../metabolome_raw_3372.tsv
+annotation_path = /.../xiaomi_T2T_Annotation.smoke_genes.txt
+literature_evidence_path = /.../verified_literature_evidence.tsv
+
+后端先用 evidence_adapters.py 把 DEG、代谢组、功能注释和文献证据统一解析成结构化 records。
+
+线 4 会这样处理：
+
+1. collect_input_file_diagnostics()
+   判断这些路径是否存在，并生成 input_debug
+
+2. read_transcriptome_records()
+   从 significant_de_genes.tsv 读取 Si9g037800、logFC、padj 等
+   生成 T1 transcriptome_records
+
+3. collect_annotation_evidence()
+   用 annotation_path 和 DEG gene_id 匹配
+   生成 significant_de_genes.annotated.tsv
+   生成 A1 annotation_evidence
+
+4. collect_literature_evidence_diagnostics()
+   读取 verified_literature_evidence.tsv
+   只保留有 DOI 和 quoted_sentence 的 verified 文献
+
+5. 代谢组 preview
+   读取 metabolome_raw_3372.tsv 前若干行
+   生成 M1 metabolome_context
+
+6. build_omics_evidence_pack()
+   把 T1 / M1 / A1 / literature / genome_context 打包成 omics_evidence_pack.v1
+
+7. workflow.py 补充 PubMed background_literature_records
+
+8. workflow.py 更新 guard_requirements.allowed_dois / allowed_quoted_sentences
+
+9. write_evidence_pack()
+   写出 omics_evidence_pack.json
+```
+
+### 4.B Tool 总入口 backend/package/yuxi/agents/toolkits/breeding/omics_analysis.py
+线 2 和线 4 之间的工具总入口
+完整位置是：
+前端 breeding_context
+  ↓
+chat_service.py: _build_direct_breeding_tool_input()
+  ↓
+omics_analysis.py: omics_breeding_analysis_run()
+  ↓
+omics_analysis.py: _run_omics_breeding_analysis_impl()
+  ↓
+workflow.py: prepare_cited_guarded_omics_analysis_from_context()
+  ↓
+Evidence Pack / Citation / Guard / frontend_payload
+负责“把哪些路径交给证据读取层”、“调用 citation workflow 并返回结果”、“返回 frontend_payload 给前端”
 
 ---
 
