@@ -4,6 +4,7 @@ import csv
 import gzip
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -173,6 +174,13 @@ ANNOTATION_NOISE_EXACT = {
 }
 QUERY_PLAN_SPECIES_TERMS = ("Setaria italica", "foxtail millet")
 PFAM_FIELD_PRIORITY = ("pfam", "Pfam_Description", "PFAM", "pfam_description")
+QUERY_PLAN_PRIORITY_LIMITS = {
+    "high": 8,
+    "medium": 4,
+    "low": 2,
+    "fallback": 4,
+}
+QUERY_PLAN_TOTAL_LIMIT = 18
 TRAIT_SYNONYM_MAP = {
     "黄酮": ["flavonoid", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
     "flavonoid": ["黄酮", "flavonoid biosynthesis", "chalcone", "chalcone isomerase", "phenylpropanoid"],
@@ -948,6 +956,114 @@ def _clean_pfam_keyword(term: Any) -> str:
     return text
 
 
+def _looks_like_url_or_noise_term(term: str) -> bool:
+    lower = str(term or "").strip().lower()
+    if not lower:
+        return True
+    if lower in ANNOTATION_NOISE_EXACT:
+        return True
+    if any(noise in lower for noise in ANNOTATION_NOISE_SUBSTRINGS):
+        return True
+    if lower.startswith(("http://", "https://", "www.")) or "://" in lower:
+        return True
+    if "unnamed protein" in lower or "uncharacterized protein" in lower:
+        return True
+    return False
+
+
+def _classify_annotation_identifier(term: Any) -> tuple[str, str]:
+    text = str(term or "").strip()
+    if not text:
+        return ("", "")
+    if _looks_like_url_or_noise_term(text):
+        return ("noise", "")
+    if re.fullmatch(r"GO:\d{4,}", text, flags=re.IGNORECASE):
+        return ("go_ids", text)
+    if re.fullmatch(r"PF\d{4,}", text, flags=re.IGNORECASE):
+        return ("pfam_ids", text)
+    if re.fullmatch(r"ko\d{4,}", text, flags=re.IGNORECASE) or re.fullmatch(
+        r"K\d{4,}", text, flags=re.IGNORECASE
+    ):
+        return ("ko_terms", text)
+    if re.fullmatch(r"LSE\d+", text, flags=re.IGNORECASE):
+        return ("pathway_ids", text)
+    if re.fullmatch(r"E\d+(?:\.\d+)+", text, flags=re.IGNORECASE):
+        return ("pathway_ids", text)
+    if re.fullmatch(r"\d+(?:\.\d+)*", text):
+        return ("pathway_ids", text)
+    return ("", text)
+
+
+def _is_human_readable_query_term(term: Any) -> bool:
+    text = str(term or "").strip()
+    if not text:
+        return False
+    bucket, normalized = _classify_annotation_identifier(text)
+    if bucket in {"noise", "go_ids", "pfam_ids", "ko_terms", "pathway_ids"}:
+        return False
+    if len(normalized) < 4:
+        return False
+    if not any(ch.isalpha() for ch in normalized):
+        return False
+    compact = normalized.replace("-", "").replace("_", "").replace(" ", "")
+    if compact.isdigit():
+        return False
+    return True
+
+
+def _collect_query_plan_term_metadata(candidate_annotations: list[dict[str, Any]]) -> dict[str, list[str]]:
+    readable_terms: list[str] = []
+    pathway_ids: list[str] = []
+    ko_terms: list[str] = []
+    go_ids: list[str] = []
+    pfam_ids: list[str] = []
+
+    for candidate in candidate_annotations:
+        annotation_fields = candidate.get("annotation_fields") or {}
+        candidate_terms = [
+            *(candidate.get("pathway_terms") or []),
+            *(candidate.get("go_terms") or []),
+            *(candidate.get("domain_terms") or []),
+            *(candidate.get("normalized_function_terms") or []),
+        ]
+        for term in candidate_terms:
+            cleaned = _clean_annotation_term(term)
+            if not cleaned:
+                continue
+            bucket, normalized = _classify_annotation_identifier(cleaned)
+            if bucket == "pathway_ids":
+                pathway_ids.append(normalized)
+                continue
+            if bucket == "ko_terms":
+                ko_terms.append(normalized)
+                continue
+            if bucket == "go_ids":
+                go_ids.append(normalized)
+                continue
+            if bucket == "pfam_ids":
+                pfam_ids.append(normalized)
+                continue
+            if bucket == "noise":
+                continue
+            if _is_human_readable_query_term(normalized):
+                readable_terms.append(normalized)
+        raw_annotation_text = " ".join(str(value or "") for value in annotation_fields.values())
+        pathway_ids.extend(re.findall(r"\bLSE\d+\b", raw_annotation_text, flags=re.IGNORECASE))
+        pathway_ids.extend(re.findall(r"\bE\d+(?:\.\d+)+\b", raw_annotation_text, flags=re.IGNORECASE))
+        ko_terms.extend(re.findall(r"\bko\d{4,}\b", raw_annotation_text, flags=re.IGNORECASE))
+        ko_terms.extend(re.findall(r"\bK\d{4,}\b", raw_annotation_text, flags=re.IGNORECASE))
+        go_ids.extend(re.findall(r"\bGO:\d{4,}\b", raw_annotation_text, flags=re.IGNORECASE))
+        pfam_ids.extend(re.findall(r"\bPF\d{4,}\b", raw_annotation_text, flags=re.IGNORECASE))
+
+    return {
+        "query_pathway_terms": _deduplicate_strings(readable_terms)[:12],
+        "pathway_ids": _deduplicate_strings(pathway_ids)[:20],
+        "ko_terms": _deduplicate_strings(ko_terms)[:20],
+        "go_ids": _deduplicate_strings(go_ids)[:20],
+        "pfam_ids": _deduplicate_strings(pfam_ids)[:20],
+    }
+
+
 def re_split_annotation_text(text: str) -> list[str]:
     separators = [";", "|", ",", "/", "(", ")", "[", "]"]
     normalized = str(text or "")
@@ -1247,6 +1363,8 @@ def _build_literature_query_plan(
         normalized_query = " ".join(str(query or "").split())
         if not normalized_query or normalized_query in seen_queries:
             return
+        if priority == "fallback" and counters[priority] >= QUERY_PLAN_PRIORITY_LIMITS[priority]:
+            return
         seen_queries.add(normalized_query)
         counters[priority] = counters.get(priority, 0) + 1
         prefix = {
@@ -1271,47 +1389,65 @@ def _build_literature_query_plan(
 
     for gene_id in candidate_gene_ids:
         for pfam_keyword in pfam_keywords_by_gene.get(gene_id) or []:
+            combo_counts = {"high": 0, "medium": 0, "low": 0}
+            combo_total = 0
+
+            def add_gene_entry(
+                *,
+                query_type: str,
+                priority: str,
+                query: str,
+                old_keywords: list[str] | None = None,
+            ) -> None:
+                nonlocal combo_total
+                if combo_total >= QUERY_PLAN_TOTAL_LIMIT:
+                    return
+                if combo_counts.get(priority, 0) >= QUERY_PLAN_PRIORITY_LIMITS[priority]:
+                    return
+                before = len(query_entries)
+                add_entry(
+                    query_type=query_type,
+                    priority=priority,
+                    gene_id=gene_id,
+                    pfam_keyword=pfam_keyword,
+                    old_keywords=old_keywords,
+                    query=query,
+                )
+                if len(query_entries) > before:
+                    combo_counts[priority] = combo_counts.get(priority, 0) + 1
+                    combo_total += 1
+
             for species in QUERY_PLAN_SPECIES_TERMS:
                 for trait_term in trait_terms[:2]:
-                    add_entry(
+                    add_gene_entry(
                         query_type="species_pfam_trait",
                         priority="high",
-                        gene_id=gene_id,
-                        pfam_keyword=pfam_keyword,
                         old_keywords=[species, trait_term],
                         query=f'{species} "{pfam_keyword}" {trait_term}',
                     )
-                for pathway_term in pathway_terms[:4]:
-                    add_entry(
+                for pathway_term in pathway_terms[:2]:
+                    add_gene_entry(
                         query_type="species_pfam_pathway",
                         priority="high",
-                        gene_id=gene_id,
-                        pfam_keyword=pfam_keyword,
                         old_keywords=[species, pathway_term],
                         query=f'{species} "{pfam_keyword}" "{pathway_term}"',
                     )
-                add_entry(
+                add_gene_entry(
                     query_type="species_pfam",
                     priority="medium",
-                    gene_id=gene_id,
-                    pfam_keyword=pfam_keyword,
                     old_keywords=[species],
                     query=f'{species} "{pfam_keyword}"',
                 )
             for trait_term in trait_terms[:2]:
-                add_entry(
+                add_gene_entry(
                     query_type="pfam_trait",
                     priority="medium",
-                    gene_id=gene_id,
-                    pfam_keyword=pfam_keyword,
                     old_keywords=[trait_term],
                     query=f'"{pfam_keyword}" {trait_term}',
                 )
-            add_entry(
+            add_gene_entry(
                 query_type="gene_pfam",
                 priority="low",
-                gene_id=gene_id,
-                pfam_keyword=pfam_keyword,
                 old_keywords=[gene_id],
                 query=f'{gene_id} "{pfam_keyword}"',
             )
@@ -1386,6 +1522,10 @@ def collect_annotation_evidence(
         "trait_relevant_annotation_gene_ids": [],
         "candidate_annotations": [],
         "pathway_summary": [],
+        "pathway_ids": [],
+        "ko_terms": [],
+        "go_ids": [],
+        "pfam_ids": [],
         "pubmed_query_terms": [],
         "recognized_columns": {},
     }
@@ -1460,13 +1600,8 @@ def collect_annotation_evidence(
         matched_transcript_count += int(candidate.get("matched_transcript_count") or 0)
         candidate_annotations.append(candidate)
 
-    pathway_summary = _deduplicate_strings(
-        [
-            term
-            for item in candidate_annotations
-            for term in (item.get("pathway_terms") or [])
-        ]
-    )[:30]
+    query_plan_term_metadata = _collect_query_plan_term_metadata(candidate_annotations)
+    pathway_summary = query_plan_term_metadata["query_pathway_terms"][:30]
     pubmed_query_terms = _deduplicate_strings(
         [
             term
@@ -1511,6 +1646,10 @@ def collect_annotation_evidence(
         "trait_relevant_annotation_gene_ids": trait_relevant_gene_ids,
         "candidate_annotations": candidate_annotations,
         "pathway_summary": pathway_summary,
+        "pathway_ids": query_plan_term_metadata["pathway_ids"],
+        "ko_terms": query_plan_term_metadata["ko_terms"],
+        "go_ids": query_plan_term_metadata["go_ids"],
+        "pfam_ids": query_plan_term_metadata["pfam_ids"],
         "pubmed_query_terms": pubmed_query_terms,
         "pfam_literature_keywords": pfam_literature_keywords,
         "literature_query_plan_path": query_plan_path,

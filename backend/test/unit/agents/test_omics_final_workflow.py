@@ -187,6 +187,8 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     assert result["summary"]["pfam_literature_keywords"] == ["chalcone isomerase domain"]
     assert result["summary"]["literature_query_plan_count"] > 0
     assert result["summary"]["literature_query_plan_source"] == "annotated_transcriptome_pfam"
+    assert result["summary"]["pathway_ids"] == []
+    assert result["summary"]["ko_terms"] == []
     assert result["summary"]["annotated_transcriptome_path"].endswith(
         "transcriptome_deg/significant_de_genes.annotated.tsv"
     )

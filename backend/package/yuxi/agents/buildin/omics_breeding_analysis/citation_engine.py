@@ -496,6 +496,10 @@ def _summarize_annotation_record(record: dict[str, Any]) -> dict[str, Any]:
         "isoform_count": int(record.get("annotation_isoform_count") or 0),
         "candidate_annotations": list(record.get("candidate_annotations") or []),
         "pathway_summary": list(record.get("pathway_summary") or []),
+        "pathway_ids": list(record.get("pathway_ids") or []),
+        "ko_terms": list(record.get("ko_terms") or []),
+        "go_ids": list(record.get("go_ids") or []),
+        "pfam_ids": list(record.get("pfam_ids") or []),
         "pubmed_query_terms": list(record.get("pubmed_query_terms") or []),
         "pfam_literature_keywords": list(record.get("pfam_literature_keywords") or []),
         "literature_query_plan_path": _as_str(record.get("literature_query_plan_path")),
@@ -772,6 +776,13 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                     f"literature_query_plan.jsonl：{annotation_summary['literature_query_plan_path'] or '未生成'}",
                     f"query 数量：{annotation_summary['literature_query_plan_count']}",
                     "query plan 证据角色：文献检索计划，不等同于文献证据",
+                    (
+                        "编号类元数据："
+                        f"pathway_ids={', '.join(annotation_summary['pathway_ids'][:6]) or '无'}; "
+                        f"ko_terms={', '.join(annotation_summary['ko_terms'][:6]) or '无'}; "
+                        f"go_ids={', '.join(annotation_summary['go_ids'][:6]) or '无'}; "
+                        f"pfam_ids={', '.join(annotation_summary['pfam_ids'][:6]) or '无'}"
+                    ),
                     f"匹配基因数量：{annotation_summary['match_count']}",
                     f"未匹配基因数量：{annotation_summary['unmatched_count']}",
                     f"多 isoform / transcript 记录数：{annotation_summary['isoform_count']}",
@@ -1139,6 +1150,10 @@ def _format_annotation_context(evidence_pack: dict[str, Any]) -> str:
         f"- literature_query_plan_count={int(metadata.get('literature_query_plan_count') or 0)}",
         f"- literature_query_plan_path={_as_str(metadata.get('literature_query_plan_path')) or 'N/A'}",
         "- literature_query_plan_role=待检索计划，不等同于 PubMed 文献证据",
+        f"- pathway_ids={', '.join(metadata.get('pathway_ids') or []) or 'N/A'}",
+        f"- ko_terms={', '.join(metadata.get('ko_terms') or []) or 'N/A'}",
+        f"- go_ids={', '.join(metadata.get('go_ids') or []) or 'N/A'}",
+        f"- pfam_ids={', '.join(metadata.get('pfam_ids') or []) or 'N/A'}",
     ]
     for candidate in list(metadata.get("candidate_annotations") or [])[:6]:
         if isinstance(candidate, dict):

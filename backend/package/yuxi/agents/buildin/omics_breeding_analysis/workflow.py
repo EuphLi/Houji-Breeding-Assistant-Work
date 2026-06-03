@@ -170,6 +170,10 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "trait_relevant_annotation_gene_ids": annotation_debug.get("trait_relevant_annotation_gene_ids")
         or [],
         "pathway_summary": annotation_debug.get("pathway_summary") or [],
+        "pathway_ids": annotation_debug.get("pathway_ids") or [],
+        "ko_terms": annotation_debug.get("ko_terms") or [],
+        "go_ids": annotation_debug.get("go_ids") or [],
+        "pfam_ids": annotation_debug.get("pfam_ids") or [],
         "pubmed_query_terms": annotation_debug.get("pubmed_query_terms") or [],
         "pfam_literature_keywords": annotation_debug.get("pfam_literature_keywords") or [],
         "literature_query_plan_path": annotation_debug.get("literature_query_plan_path", ""),

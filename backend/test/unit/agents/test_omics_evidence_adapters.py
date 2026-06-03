@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from yuxi.agents.buildin.omics_breeding_analysis.context import (
     OmicsBreedingAnalysisContext,
@@ -232,14 +233,27 @@ def test_annotation_evidence_adapter_filters_dirty_tokens_from_summary_terms(tmp
     metadata = pack["evidence"]["annotation"][0]["metadata"]
     summary_text = " ".join(metadata["pathway_summary"])
 
-    assert "ko00941" in summary_text
     assert "Flavonoid biosynthesis" in summary_text
-    assert "GO:0009813" in " ".join(metadata["candidate_annotations"][0]["go_terms"])
+    assert "ko00941" not in summary_text
+    assert "GO:0009813" in metadata["go_ids"]
+    assert "K01859" in metadata["ko_terms"]
+    assert "ko00941" in metadata["ko_terms"]
     assert "dbget-bin" not in summary_text
     assert "www_bget" not in summary_text
     assert "URL 片段" not in summary_text
     assert "[X]" not in summary_text
     assert "Uncharacterized protein" not in summary_text
+    query_plan_path = Path(metadata["literature_query_plan_path"])
+    query_entries = [
+        json.loads(line)
+        for line in query_plan_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert not any(
+        entry["query_type"] == "species_pfam_pathway"
+        and any(token in entry["query"] for token in ["K01859", "ko00941"])
+        for entry in query_entries
+    )
 
 
 def test_annotation_evidence_adapter_degrades_without_annotation_file(tmp_path):
