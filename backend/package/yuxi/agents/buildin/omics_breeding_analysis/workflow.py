@@ -140,6 +140,24 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "annotation_path_exists": bool(input_debug.get("annotation_path_exists")),
         "annotated_transcriptome_path": annotation_debug.get("annotated_transcriptome_path", "")
         or input_debug.get("annotated_transcriptome_path", ""),
+        "annotation_merge_status": annotation_debug.get("annotation_merge_status", ""),
+        "annotation_merge_warning": annotation_debug.get("annotation_merge_warning", ""),
+        "annotation_merge_method": annotation_debug.get("annotation_merge_method", ""),
+        "annotation_merge_total_count": int(
+            annotation_debug.get("annotation_merge_total_count") or 0
+        ),
+        "annotation_merge_matched_count": int(
+            annotation_debug.get("annotation_merge_matched_count") or 0
+        ),
+        "annotation_merge_unmatched_count": int(
+            annotation_debug.get("annotation_merge_unmatched_count") or 0
+        ),
+        "annotation_merge_duplicate_count": int(
+            annotation_debug.get("annotation_merge_duplicate_count") or 0
+        ),
+        "annotated_transcriptome_read_by_llm": bool(
+            annotation_debug.get("annotated_transcriptome_read_by_llm")
+        ),
         "annotation_gene_match_count": int(annotation_debug.get("annotation_gene_match_count") or 0),
         "annotation_unmatched_gene_count": int(
             annotation_debug.get("annotation_unmatched_gene_count") or 0
@@ -203,6 +221,13 @@ def _build_warnings(evidence_pack: dict[str, Any]) -> list[str]:
 
     if summary.get("annotation_path_exists") and summary.get("annotation_gene_match_count") == 0:
         warnings.append("已读取到功能注释文件，但未与当前 DEG 候选基因匹配到功能注释。")
+    if (
+        summary.get("annotation_path_exists")
+        and summary.get("annotation_merge_status")
+        and summary.get("annotation_merge_status") != "completed"
+        and summary.get("annotation_merge_warning")
+    ):
+        warnings.append(summary["annotation_merge_warning"])
 
     return warnings
 
@@ -528,6 +553,9 @@ def prepare_cited_guarded_omics_analysis_from_context(
         "citation_disabled_reason": citation_result.get("disabled_reason", ""),
         "llamaindex_available": bool(citation_result.get("llamaindex_available")),
         "literature_card_count": len(citation_result["literature_cards"]),
+        "annotated_transcriptome_read_by_llm": bool(
+            (citation_result.get("analysis_prompt") or {}).get("annotated_transcriptome_read_by_llm")
+        ),
     }
 
     # 组装 final_result，这是后端最终结果的主结构

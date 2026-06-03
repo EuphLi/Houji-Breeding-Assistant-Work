@@ -131,6 +131,12 @@ def test_build_citation_result_includes_a1_annotation_source_and_claim_trace(mon
                 "annotation_file_name": "uploaded_gene_function_table.tsv",
                 "annotation_path_exists": True,
                 "annotated_transcriptome_path": "/tmp/transcriptome_deg/significant_de_genes.annotated.tsv",
+                "annotation_merge_status": "completed",
+                "annotation_merge_method": "按 gene_id 将 DEG 结果与功能注释文件对映",
+                "annotation_merge_total_count": 1,
+                "annotation_merge_matched_count": 1,
+                "annotation_merge_unmatched_count": 0,
+                "annotation_merge_duplicate_count": 1,
                 "annotation_gene_match_count": 1,
                 "annotation_unmatched_gene_count": 0,
                 "annotation_duplicate_gene_id_count": 1,
@@ -177,24 +183,40 @@ def test_build_citation_result_includes_a1_annotation_source_and_claim_trace(mon
 
     citation_ids = [item["citation_id"] for item in result["citations"]]
     assert "A1" in citation_ids
-    assert "已从用户上传功能注释文件生成 A1 功能注释证据" in result["answer_markdown"]
+    assert "系统已将转录组 DEG 结果与用户上传功能注释文件按 gene_id 合并" in result["answer_markdown"]
     assert "[A1] [Guard]" in result["answer_markdown"]
     _, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
     assert "[A1] 基因功能注释证据" in source_index
     assert "uploaded_gene_function_table.tsv" in source_index
+    assert "merged annotated DEG 文件：/tmp/transcriptome_deg/significant_de_genes.annotated.tsv" in source_index
+    assert "merge 统计：total=1 matched=1 unmatched=0 duplicate=1" in source_index
+    assert "LLM 分析输入：未读取完整 merged annotated DEG 文件" in source_index
     assert "flavonoid biosynthesis" in source_index
     assert "chalcone isomerase" in source_index
     assert any("A1" in row["citation_ids"] for row in result["claim_trace"])
-    assert "GeneID\tmRNA_id" not in result["answer_markdown"]
+    assert "系统已将转录组 DEG 结果与用户上传功能注释文件按 gene_id 合并" in result["answer_markdown"]
 
 
-def test_build_breeding_analysis_prompt_includes_annotation_summary_not_raw_table():
+def test_build_breeding_analysis_prompt_includes_full_annotated_tsv(tmp_path):
     evidence_pack = _sample_evidence_pack()
+    annotated_path = tmp_path / "transcriptome_deg" / "significant_de_genes.annotated.tsv"
+    annotated_path.parent.mkdir()
+    annotated_path.write_text(
+        "gene_id\tlogFC\tannotation\tgene_id\tdescription\n"
+        "GeneA\t1.8\tchalcone--flavonone isomerase\tGeneA\tdrought response protein\n",
+        encoding="utf-8",
+    )
     evidence_pack["evidence"]["annotation"] = [
         {
             "evidence_id": "A1",
             "metadata": {
                 "annotation_file_name": "custom_function_annotation.tsv",
+                "annotated_transcriptome_path": str(annotated_path),
+                "annotation_merge_status": "completed",
+                "annotation_merge_total_count": 1,
+                "annotation_merge_matched_count": 1,
+                "annotation_merge_unmatched_count": 0,
+                "annotation_merge_duplicate_count": 0,
                 "annotation_gene_match_count": 1,
                 "annotation_unmatched_gene_count": 0,
                 "candidate_annotations": [
@@ -211,6 +233,11 @@ def test_build_breeding_analysis_prompt_includes_annotation_summary_not_raw_tabl
             },
         }
     ]
+    evidence_pack["debug"] = {
+        "annotation": {
+            "annotated_transcriptome_path": str(annotated_path),
+        }
+    }
 
     prompt = build_breeding_analysis_prompt(
         evidence_pack=evidence_pack,
@@ -220,7 +247,11 @@ def test_build_breeding_analysis_prompt_includes_annotation_summary_not_raw_tabl
 
     assert "custom_function_annotation.tsv" in prompt["user_prompt"]
     assert "drought response protein" in prompt["user_prompt"]
-    assert "GeneID\tmRNA_id" not in prompt["user_prompt"]
+    assert "## 转录组-功能注释合并文件全文" in prompt["user_prompt"]
+    assert "significant_de_genes.annotated.tsv" in prompt["user_prompt"]
+    assert "gene_id\tlogFC\tannotation\tgene_id\tdescription" in prompt["user_prompt"]
+    assert "GeneA\t1.8\tchalcone--flavonone isomerase\tGeneA\tdrought response protein" in prompt["user_prompt"]
+    assert prompt["annotated_transcriptome_read_by_llm"] is True
 
 
 def test_build_breeding_analysis_prompt_changes_with_trait():
@@ -242,12 +273,60 @@ def test_build_breeding_analysis_prompt_changes_with_trait():
     assert "flavonoid" in flavonoid_prompt["user_prompt"].lower() or "黄酮" in flavonoid_prompt["user_prompt"]
 
 
-def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkeypatch):
+def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkeypatch, tmp_path):
+    evidence_pack = _sample_evidence_pack()
+    annotated_path = tmp_path / "transcriptome_deg" / "significant_de_genes.annotated.tsv"
+    annotated_path.parent.mkdir()
+    annotated_path.write_text(
+        "gene_id\tlogFC\tannotation\tgene_id\tdescription\n"
+        "GeneA\t1.8\tchalcone--flavonone isomerase\tGeneA\tdrought response protein\n",
+        encoding="utf-8",
+    )
+    evidence_pack["evidence"]["annotation"] = [
+        {
+            "evidence_id": "A1",
+            "metadata": {
+                "annotation_file_name": "custom_function_annotation.tsv",
+                "annotated_transcriptome_path": str(annotated_path),
+                "annotation_merge_status": "completed",
+                "annotation_merge_total_count": 1,
+                "annotation_merge_matched_count": 1,
+                "annotation_merge_unmatched_count": 0,
+                "annotation_merge_duplicate_count": 0,
+                "annotation_gene_match_count": 1,
+                "annotation_unmatched_gene_count": 0,
+                "candidate_annotations": [
+                    {
+                        "gene_id": "GeneA",
+                        "normalized_function_terms": ["drought response protein"],
+                        "pathway_terms": ["ABA signaling"],
+                        "domain_terms": ["InterPro IPR0001"],
+                        "trait_relevance_level": "medium",
+                    }
+                ],
+                "pathway_summary": ["ABA signaling"],
+                "pubmed_query_terms": ["GeneA", "drought response protein"],
+            },
+        }
+    ]
+    evidence_pack["debug"] = {
+        "annotation": {
+            "annotated_transcriptome_path": str(annotated_path),
+        }
+    }
+
     class FakeModel:
         def invoke(self, messages):
             joined = "\n".join(str(item.content) for item in messages)
             assert "抗旱" in joined
-            return type("Response", (), {"content": "# 多组学育种分析结果\n\n当前分析围绕抗旱相关性状展开。"})
+            assert "## 转录组-功能注释合并文件全文" in joined
+            assert "gene_id\tlogFC\tannotation\tgene_id\tdescription" in joined
+            assert "GeneA\t1.8\tchalcone--flavonone isomerase\tGeneA\tdrought response protein" in joined
+            return type(
+                "Response",
+                (),
+                {"content": "# 多组学育种分析结果\n\n当前分析围绕抗旱相关性状展开，并参考了完整 merged annotated DEG 文件。"},
+            )
 
     monkeypatch.setattr(
         "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
@@ -255,7 +334,7 @@ def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkey
     )
 
     result = build_citation_result(
-        evidence_pack=_sample_evidence_pack(),
+        evidence_pack=evidence_pack,
         question="根据数据给出候选验证方案",
         use_llamaindex=False,
         model_name="provider:model",
@@ -263,9 +342,12 @@ def test_build_citation_result_prefers_llm_when_model_invocation_succeeds(monkey
 
     assert result["backend"] == "canonical_renderer"
     assert result["raw_answer_backend"] == "llm"
-    assert "抗旱相关性状" in result["raw_llm_answer"]
+    assert "完整 merged annotated DEG 文件" in result["raw_llm_answer"]
+    assert result["analysis_prompt"]["annotated_transcriptome_read_by_llm"] is True
     assert "# 育种建议报告" in result["answer_markdown"]
-    assert "当前分析围绕抗旱相关性状展开。" not in result["answer_markdown"]
+    body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
+    assert "完整 merged annotated DEG 文件" not in body
+    assert "LLM 分析输入：已读取完整 merged annotated DEG 文件" in source_index
 
 
 # 测试验证 claim_trace 能标记哪些句子有 citation，哪些句子没有 citation

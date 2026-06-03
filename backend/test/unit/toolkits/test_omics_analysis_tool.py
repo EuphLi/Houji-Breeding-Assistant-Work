@@ -260,7 +260,19 @@ def test_search_background_literature_returns_unavailable_when_pubmed_fails(monk
     assert "PubMed query failed" in result["warnings"][0]
 
 
-def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_path):
+def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "queries": [],
+            "warnings": [],
+        },
+    )
     deg_path = tmp_path / "significant_de_genes.tsv"
     deg_path.write_text(
         "gene_id\tlogFC\tpvalue\tpadj\tannotation\n"
@@ -284,6 +296,7 @@ def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_pat
     assert result["status"] == "completed"
     assert result["summary"]["literature_path_exists"] is False
     assert result["summary"]["usable_literature_count"] == 0
+    assert result["summary"]["background_literature_count"] == 0
     body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
     assert "当前未检索到可用 PubMed 背景文献。[Guard]" in body
     assert "[BG1]" not in body
@@ -294,6 +307,65 @@ def test_omics_breeding_analysis_tool_impl_handles_empty_literature_path(tmp_pat
     assert "[BG1]" not in source_index
     assert "[BG2]" not in source_index
     assert all("BG" not in " ".join(row["citation_ids"]) for row in result["claim_trace"])
+
+
+def test_omics_breeding_analysis_tool_impl_keeps_raw_deg_and_generates_annotated_deg(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "records": [],
+            "warnings": [],
+        },
+    )
+    deg_dir = tmp_path / "transcriptome_deg"
+    deg_dir.mkdir()
+    deg_path = deg_dir / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpadj\n"
+        "GeneA\t1.8\t0.02\n"
+        "GeneB\t-1.2\t0.04\n",
+        encoding="utf-8",
+    )
+    annotation_path = tmp_path / "annotation.tsv"
+    annotation_path.write_text(
+        "gene_id\tdescription\n"
+        "GeneA\tchalcone isomerase\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "omics_run"
+
+    result = _run_omics_breeding_analysis_impl(
+        trait="黄酮相关",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        metabolome_path="",
+        annotation_path=str(annotation_path),
+        literature_evidence_path="",
+        evidence_pack_output_path=str(output_dir / "omics_evidence_pack.json"),
+        output_dir=str(output_dir),
+        use_llamaindex=False,
+    )
+
+    annotated_path = deg_dir / "significant_de_genes.annotated.tsv"
+    assert result["status"] == "completed"
+    assert deg_path.exists()
+    assert annotated_path.exists()
+    assert result["summary"]["annotated_transcriptome_path"] == str(annotated_path)
+    assert result["summary"]["annotation_merge_matched_count"] == 1
+    assert result["summary"]["annotation_merge_unmatched_count"] == 1
+    assert result["summary"]["annotated_transcriptome_read_by_llm"] is True
+    assert "## 转录组-功能注释合并文件全文" in result["analysis_prompt"]["user_prompt"]
+    assert "GeneA\t1.8\t0.02\tGeneA\tchalcone isomerase" in result["analysis_prompt"]["user_prompt"]
 
 
 def test_omics_breeding_analysis_tool_impl_merges_background_literature_records(

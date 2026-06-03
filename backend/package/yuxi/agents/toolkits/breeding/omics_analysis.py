@@ -534,6 +534,7 @@ def _run_omics_breeding_analysis_impl(
         "claim_trace": result["claim_trace"],
         "source_nodes": result.get("source_nodes") or [],
         "frontend_payload": result.get("frontend_payload") or {},
+        "analysis_prompt": result.get("analysis_prompt") or {},
         "evidence_pack_path": result["evidence_pack_path"],
         "answer_markdown_path": result["answer_markdown_path"], # 页面正文
         "citation_result_path": result["citation_result_path"],

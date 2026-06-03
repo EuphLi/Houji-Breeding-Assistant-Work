@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain.messages import HumanMessage, SystemMessage
@@ -60,6 +61,63 @@ class CitationSource:
 
 def _as_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+MAX_ANNOTATED_TRANSCRIPTOME_PROMPT_CHARS = 120_000
+
+
+def _display_annotated_transcriptome_path(path_value: str) -> str:
+    path = Path(path_value)
+    if path.name == "significant_de_genes.annotated.tsv":
+        return f"{path.parent.name}/{path.name}" if path.parent.name else path.name
+    return path_value or "transcriptome_deg/significant_de_genes.annotated.tsv"
+
+
+def _read_full_annotated_transcriptome_for_prompt(
+    evidence_pack: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_debug = ((evidence_pack.get("debug") or {}).get("annotation") or {})
+    annotated_path = _as_str(annotation_debug.get("annotated_transcriptome_path"))
+    display_path = _display_annotated_transcriptome_path(annotated_path)
+    if not annotated_path:
+        return {
+            "annotated_transcriptome_path": "",
+            "display_path": display_path,
+            "read_by_llm": False,
+            "warning": "Merged annotated DEG file was not generated.",
+            "content": "",
+        }
+
+    path = Path(annotated_path)
+    if not path.is_file():
+        return {
+            "annotated_transcriptome_path": annotated_path,
+            "display_path": display_path,
+            "read_by_llm": False,
+            "warning": f"Merged annotated DEG file not found: {annotated_path}",
+            "content": "",
+        }
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if len(content) > MAX_ANNOTATED_TRANSCRIPTOME_PROMPT_CHARS:
+        return {
+            "annotated_transcriptome_path": annotated_path,
+            "display_path": display_path,
+            "read_by_llm": False,
+            "warning": (
+                "Merged annotated DEG file is too large to include in the LLM context "
+                f"without truncation ({len(content)} chars)."
+            ),
+            "content": "",
+        }
+
+    return {
+        "annotated_transcriptome_path": annotated_path,
+        "display_path": display_path,
+        "read_by_llm": True,
+        "warning": "",
+        "content": content,
+    }
 
 
 def _has_real_background_literature_evidence(record: dict[str, Any]) -> bool:
@@ -162,6 +220,11 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
             text_parts.append(f"匹配基因：{', '.join(str(item) for item in gene_ids[:8])}。")
         if pathway_summary:
             text_parts.append(f"关键通路/功能术语：{', '.join(str(item) for item in pathway_summary[:8])}。")
+        if metadata.get("annotated_transcriptome_path"):
+            text_parts.append(
+                "merged annotated DEG 文件："
+                f"{_display_annotated_transcriptome_path(_as_str(metadata.get('annotated_transcriptome_path')))}。"
+            )
         sources.append(
             CitationSource(
                 citation_id=_as_str(record.get("evidence_id")) or f"A{index}",
@@ -420,6 +483,13 @@ def _summarize_annotation_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "source_file": _as_str(record.get("annotation_file") or record.get("source_file")),
         "annotated_transcriptome_path": _as_str(record.get("annotated_transcriptome_path")),
+        "annotation_merge_status": _as_str(record.get("annotation_merge_status")),
+        "annotation_merge_method": _as_str(record.get("annotation_merge_method")),
+        "annotation_merge_total_count": int(record.get("annotation_merge_total_count") or 0),
+        "annotation_merge_matched_count": int(record.get("annotation_merge_matched_count") or 0),
+        "annotation_merge_unmatched_count": int(record.get("annotation_merge_unmatched_count") or 0),
+        "annotation_merge_duplicate_count": int(record.get("annotation_merge_duplicate_count") or 0),
+        "annotated_transcriptome_read_by_llm": bool(record.get("annotated_transcriptome_read_by_llm")),
         "match_count": int(record.get("annotation_gene_match_count") or 0),
         "unmatched_count": int(record.get("annotation_unmatched_gene_count") or 0),
         "duplicate_gene_id_count": int(record.get("annotation_duplicate_gene_id_count") or 0),
@@ -671,12 +741,27 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                 [
                     f"[{source.citation_id}] 基因功能注释证据",
                     f"注释文件：{annotation_summary['source_file'] or '未提供'}",
+                    f"merged annotated DEG 文件：{annotation_summary['annotated_transcriptome_path'] or '未生成'}",
                     "匹配方式：按 gene_id 与 DEG 结果关联；如 DEG 与注释文件同时提供 transcript_id，则记录辅助匹配。",
+                    f"合并方式：{annotation_summary['annotation_merge_method'] or '按 gene_id 将 DEG 结果与功能注释文件对映'}",
+                    f"merge status：{annotation_summary['annotation_merge_status'] or 'unknown'}",
+                    (
+                        "merge 统计："
+                        f"total={annotation_summary['annotation_merge_total_count']} "
+                        f"matched={annotation_summary['annotation_merge_matched_count']} "
+                        f"unmatched={annotation_summary['annotation_merge_unmatched_count']} "
+                        f"duplicate={annotation_summary['annotation_merge_duplicate_count']}"
+                    ),
+                    "LLM 分析输入："
+                    + (
+                        "已读取完整 merged annotated DEG 文件"
+                        if annotation_summary["annotated_transcriptome_read_by_llm"]
+                        else "未读取完整 merged annotated DEG 文件"
+                    ),
                     f"匹配基因数量：{annotation_summary['match_count']}",
                     f"未匹配基因数量：{annotation_summary['unmatched_count']}",
                     f"多 isoform / transcript 记录数：{annotation_summary['isoform_count']}",
                     f"duplicate gene_id 数：{annotation_summary['duplicate_gene_id_count']}",
-                    f"annotated DEG artifact：{annotation_summary['annotated_transcriptome_path'] or '未生成'}",
                     "候选基因功能注释摘要：",
                 ]
             )
@@ -732,6 +817,34 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
             )
 
     return lines
+
+
+def _apply_analysis_prompt_metadata_to_sources(
+    sources: list[CitationSource],
+    prompt: dict[str, Any],
+) -> list[CitationSource]:
+    updated_sources: list[CitationSource] = []
+    for source in sources:
+        if source.source_type != "annotation":
+            updated_sources.append(source)
+            continue
+        updated_sources.append(
+            CitationSource(
+                citation_id=source.citation_id,
+                source_type=source.source_type,
+                text=source.text,
+                metadata={
+                    **(source.metadata or {}),
+                    "annotated_transcriptome_read_by_llm": bool(
+                        prompt.get("annotated_transcriptome_read_by_llm")
+                    ),
+                    "annotated_transcriptome_prompt_warning": _as_str(
+                        prompt.get("annotated_transcriptome_prompt_warning")
+                    ),
+                },
+            )
+        )
+    return updated_sources
 
 
 def build_canonical_cited_answer(
@@ -792,7 +905,14 @@ def build_canonical_cited_answer(
         else f"- 当前未检索到可用 PubMed 背景文献。{_format_citation_suffix(guard_citations[:1])}"
     )
     annotation_sentence = (
-        f"- 已从用户上传功能注释文件生成 A1 功能注释证据，匹配 {annotation_summary.get('match_count', 0)} 个 DEG 候选基因；这些注释只能作为候选功能线索。{_format_citation_suffix(annotation_citations[:1] + guard_citations[:1])}"
+        f"- 系统已将转录组 DEG 结果与用户上传功能注释文件按 gene_id 合并，"
+        f"生成 merged annotated DEG 文件并纳入综合分析输入；"
+        f"merge total={annotation_summary.get('annotation_merge_total_count', 0)} "
+        f"matched={annotation_summary.get('annotation_merge_matched_count', 0)} "
+        f"unmatched={annotation_summary.get('annotation_merge_unmatched_count', 0)} "
+        f"duplicate={annotation_summary.get('annotation_merge_duplicate_count', 0)}。"
+        f"A1 功能注释证据匹配 {annotation_summary.get('match_count', 0)} 个 DEG 候选基因；这些注释只能作为候选功能线索。"
+        f"{_format_citation_suffix(annotation_citations[:1] + guard_citations[:1])}"
         if annotation_citations
         else f"- 当前未纳入用户上传功能注释证据，不能编造候选基因的 KEGG/GO/Pfam/InterPro 功能解释。{_format_citation_suffix(guard_citations[:1])}"
     )
@@ -1221,6 +1341,24 @@ def build_breeding_analysis_prompt(
     target_genes = targets.get("genes") or []
     smoke_primary_gene = _smoke_context_primary_gene(evidence_pack)
     flavonoid_trait = _is_flavonoid_trait(trait)
+    annotated_transcriptome = _read_full_annotated_transcriptome_for_prompt(evidence_pack)
+    annotated_transcriptome_lines = [
+        "## 转录组-功能注释合并文件全文",
+        "",
+        f"文件：{annotated_transcriptome['display_path']}",
+    ]
+    if annotated_transcriptome["read_by_llm"]:
+        annotated_transcriptome_lines.extend(
+            [
+                "```tsv",
+                annotated_transcriptome["content"],
+                "```",
+            ]
+        )
+    else:
+        annotated_transcriptome_lines.append(
+            f"警告：{annotated_transcriptome['warning'] or '当前未提供可读的 merged annotated DEG 文件。'}"
+        )
 
     system_prompt = "\n".join(
         [
@@ -1251,6 +1389,7 @@ def build_breeding_analysis_prompt(
             _format_citation_sources(sources, "metabolome_context"),
             "用户上传功能注释证据摘要：",
             _format_annotation_context(evidence_pack),
+            *annotated_transcriptome_lines,
             "已验证文献证据摘要：",
             _format_citation_sources(sources, "literature"),
             "PubMed 背景文献线索：",
@@ -1264,11 +1403,18 @@ def build_breeding_analysis_prompt(
             "- 只有在 default smoke 数据演示场景下，且 smoke context primary gene 非空时，才能把它写成待验证上下文线索；同时必须说明它不是已确认的 DEG 证据。",
             "- 如果 PubMed 有背景文献，请说明检索到的条数以及这些记录更像背景线索而非直接实验证据。",
             "- 文献依据部分必须引用真实 DOI 或 PMID、title，以及来自 literature_cards 的 quoted_sentence 或 abstract sentence。",
+            "- 如果提供了 merged annotated DEG 文件全文，必须将其视为本轮综合分析输入的一部分。",
             "- 不要输出内部推理过程。",
         ]
     )
 
-    return {"system_prompt": system_prompt, "user_prompt": user_prompt}
+    return {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "annotated_transcriptome_path": annotated_transcriptome["annotated_transcriptome_path"],
+        "annotated_transcriptome_read_by_llm": annotated_transcriptome["read_by_llm"],
+        "annotated_transcriptome_prompt_warning": annotated_transcriptome["warning"],
+    }
 
 
 def generate_llm_breeding_analysis(
@@ -1585,6 +1731,16 @@ def build_citation_result(
         model_name=model_name,
         fallback_enabled=True,
     )
+    prompt = engine_result.get("prompt") or {}
+    sources = _apply_analysis_prompt_metadata_to_sources(sources, prompt)
+    annotation_debug = ((evidence_pack.get("debug") or {}).get("annotation") or {})
+    if isinstance(annotation_debug, dict):
+        annotation_debug["annotated_transcriptome_read_by_llm"] = bool(
+            prompt.get("annotated_transcriptome_read_by_llm")
+        )
+        annotation_debug["annotated_transcriptome_prompt_warning"] = _as_str(
+            prompt.get("annotated_transcriptome_prompt_warning")
+        )
     raw_llm_answer = engine_result["answer_markdown"]
     answer_markdown = build_canonical_cited_answer(
         evidence_pack=evidence_pack,
@@ -1622,7 +1778,12 @@ def build_citation_result(
         "disabled_reason": disabled_reason,
         "warnings": [
             *(engine_result.get("warnings") or []),
+            *(
+                [str(prompt.get("annotated_transcriptome_prompt_warning"))]
+                if _as_str(prompt.get("annotated_transcriptome_prompt_warning"))
+                else []
+            ),
             *([f"Citation backend fallback: {disabled_reason}"] if disabled_reason else []),
         ],
-        "analysis_prompt": engine_result.get("prompt") or {},
+        "analysis_prompt": prompt,
     }

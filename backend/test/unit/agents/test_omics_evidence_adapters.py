@@ -122,6 +122,11 @@ def test_annotation_evidence_adapter_parses_custom_uploaded_annotation_and_write
     assert len(annotation_records) == 1
     metadata = annotation_records[0]["metadata"]
     assert metadata["annotation_file_name"] == "uploaded_gene_function_table.tsv"
+    assert metadata["annotation_merge_status"] == "completed"
+    assert metadata["annotation_merge_total_count"] == 2
+    assert metadata["annotation_merge_matched_count"] == 1
+    assert metadata["annotation_merge_unmatched_count"] == 1
+    assert metadata["annotation_merge_duplicate_count"] == 1
     assert metadata["annotation_gene_match_count"] == 1
     assert metadata["annotation_unmatched_gene_count"] == 1
     assert metadata["annotation_duplicate_gene_id_count"] == 1
@@ -140,9 +145,11 @@ def test_annotation_evidence_adapter_parses_custom_uploaded_annotation_and_write
     assert annotated_path.exists()
     assert deg_path.read_text(encoding="utf-8").startswith("gene_id\ttranscript_ids\tlogFC")
     annotated_text = annotated_path.read_text(encoding="utf-8")
-    assert "SwissProt_annotation" in annotated_text
-    assert "chalcone isomerase | chalcone-flavanone isomerase" in annotated_text
-    assert "unmatched" in annotated_text
+    assert annotated_text.splitlines()[0] == (
+        "gene_id\ttranscript_ids\tlogFC\tpvalue\tpadj\tGeneID\tmRNA_id\tSwissProt_annotation\tKEGG_Pathway\tGO_IDs\tPfam_Description"
+    )
+    assert "GeneA\tGeneA.t1;GeneA.t2\t1.8\t0.003\t0.02\tGeneA\tGeneA.t1\tchalcone isomerase\tflavonoid biosynthesis\tflavonoid biosynthetic process\tChalcone domain" in annotated_text
+    assert "GeneB\tGeneB.t1\t-1.2\t0.02\t0.04\t\t\t\t\t\t" in annotated_text
 
 
 def test_annotation_evidence_adapter_uses_smoke_fixture_as_normal_annotation_path(tmp_path):
@@ -233,7 +240,39 @@ def test_annotation_evidence_adapter_degrades_without_annotation_file(tmp_path):
 
     assert pack["evidence"]["annotation"] == []
     assert pack["debug"]["annotation"]["annotation_path_exists"] is False
+    assert pack["debug"]["annotation"]["annotation_merge_status"] == "skipped_missing_annotation"
+    assert pack["debug"]["annotation"]["annotated_transcriptome_path"] == ""
     assert pack["debug"]["annotation"]["candidate_annotations"] == []
+
+
+def test_annotation_evidence_adapter_returns_merge_warning_when_deg_lacks_gene_id(tmp_path):
+    deg_dir = tmp_path / "transcriptome_deg"
+    deg_dir.mkdir()
+    deg_path = deg_dir / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "feature_id\tlogFC\tpadj\n"
+        "GeneA\t1.8\t0.02\n",
+        encoding="utf-8",
+    )
+    annotation = tmp_path / "annotation.tsv"
+    annotation.write_text(
+        "gene_id\tdescription\n"
+        "GeneA\tchalcone isomerase\n",
+        encoding="utf-8",
+    )
+
+    context = OmicsBreedingAnalysisContext(
+        trait="抗旱",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        annotation_path=str(annotation),
+    )
+
+    pack = build_omics_evidence_pack_from_context(context)
+
+    assert pack["evidence"]["annotation"] == []
+    assert pack["debug"]["annotation"]["annotation_merge_status"] == "transcriptome_missing_gene_id"
+    assert "gene_id column was not found" in pack["debug"]["annotation"]["annotation_merge_warning"]
 
 
 def test_collect_input_file_diagnostics_marks_uploaded_fastq_without_deg_as_present(tmp_path):

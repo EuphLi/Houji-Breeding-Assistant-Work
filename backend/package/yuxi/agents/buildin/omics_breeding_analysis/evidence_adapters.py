@@ -8,6 +8,7 @@ from typing import Any
 
 from .context import OmicsBreedingAnalysisContext
 from .evidence_pack import build_omics_evidence_pack
+from .merge_gene_annotation import merge_gene_annotation_files
 
 """
 所属业务层次
@@ -1123,11 +1124,20 @@ def collect_annotation_evidence(
     annotation_path = input_diagnostics.get("annotation_path", "")
     annotation_exists = bool(input_diagnostics.get("annotation_path_exists"))
     transcriptome_path = input_diagnostics.get("transcriptome_result_path", "")
+    transcriptome_exists = bool(transcriptome_path) and Path(transcriptome_path).is_file()
     base_metadata = {
         "annotation_file": annotation_path,
         "annotation_file_name": Path(annotation_path).name if annotation_path else "",
         "annotation_path_exists": annotation_exists,
         "annotated_transcriptome_path": "",
+        "annotation_merge_status": "skipped_missing_annotation",
+        "annotation_merge_warning": "",
+        "annotation_merge_method": "按 gene_id 将 DEG 结果与功能注释文件对映",
+        "annotation_merge_total_count": 0,
+        "annotation_merge_matched_count": 0,
+        "annotation_merge_unmatched_count": 0,
+        "annotation_merge_duplicate_count": 0,
+        "annotated_transcriptome_read_by_llm": False,
         "annotation_gene_match_count": 0,
         "annotation_unmatched_gene_count": len(transcriptome_records),
         "annotation_duplicate_gene_id_count": 0,
@@ -1139,6 +1149,36 @@ def collect_annotation_evidence(
         "pubmed_query_terms": [],
         "recognized_columns": {},
     }
+
+    if annotation_exists and transcriptome_exists:
+        merge_result = merge_gene_annotation_files(
+            transcriptome_path,
+            annotation_path,
+            _annotation_output_path(transcriptome_path, context),
+        )
+        base_metadata.update(
+            {
+                "annotated_transcriptome_path": str(merge_result.get("output_file") or ""),
+                "annotation_merge_status": str(merge_result.get("status") or ""),
+                "annotation_merge_warning": str(merge_result.get("warning") or ""),
+                "annotation_merge_total_count": int(merge_result.get("total_count") or 0),
+                "annotation_merge_matched_count": int(merge_result.get("matched_count") or 0),
+                "annotation_merge_unmatched_count": int(merge_result.get("unmatched_count") or 0),
+                "annotation_merge_duplicate_count": int(merge_result.get("duplicate_count") or 0),
+            }
+        )
+    elif annotation_exists:
+        base_metadata["annotation_merge_status"] = "skipped_missing_transcriptome"
+        base_metadata["annotation_merge_warning"] = "Transcriptome DEG file is unavailable for annotation merge."
+
+    if base_metadata["annotation_merge_status"] in {
+        "annotation_missing_gene_id",
+        "transcriptome_missing_gene_id",
+        "annotation_empty",
+        "transcriptome_empty",
+    }:
+        return [], base_metadata
+
     if not annotation_exists or not transcriptome_records:
         return [], base_metadata
 
@@ -1180,20 +1220,6 @@ def collect_annotation_evidence(
         matched_transcript_count += int(candidate.get("matched_transcript_count") or 0)
         candidate_annotations.append(candidate)
 
-    candidate_annotations_by_gene = {
-        item["gene_id"]: item
-        for item in candidate_annotations
-        if item.get("gene_id")
-    }
-    annotated_path = ""
-    if transcriptome_path and Path(transcriptome_path).is_file():
-        annotated_path = _write_annotated_transcriptome(
-            transcriptome_path,
-            _annotation_output_path(transcriptome_path, context),
-            annotation_columns=annotation_columns,
-            candidate_annotations_by_gene=candidate_annotations_by_gene,
-        )
-
     pathway_summary = _deduplicate_strings(
         [
             term
@@ -1215,7 +1241,6 @@ def collect_annotation_evidence(
     ]
     metadata = {
         **base_metadata,
-        "annotated_transcriptome_path": annotated_path,
         "annotation_gene_match_count": len(candidate_annotations),
         "annotation_unmatched_gene_count": len(unmatched_gene_ids),
         "annotation_duplicate_gene_id_count": duplicate_gene_id_count,
@@ -1236,7 +1261,10 @@ def collect_annotation_evidence(
             "source_file": annotation_path,
             "summary": (
                 f"用户上传功能注释文件按 gene_id 与 DEG 结果关联，"
-                f"匹配 {len(candidate_annotations)} 个候选基因，未匹配 {len(unmatched_gene_ids)} 个。"
+                f"生成 merged annotated DEG 文件 {Path(metadata['annotated_transcriptome_path']).name or 'N/A'}，"
+                f"merge total={metadata['annotation_merge_total_count']} matched={metadata['annotation_merge_matched_count']} "
+                f"unmatched={metadata['annotation_merge_unmatched_count']} duplicate={metadata['annotation_merge_duplicate_count']}；"
+                f"候选基因匹配 {len(candidate_annotations)} 个，未匹配 {len(unmatched_gene_ids)} 个。"
             ),
             "metadata": metadata,
         }
