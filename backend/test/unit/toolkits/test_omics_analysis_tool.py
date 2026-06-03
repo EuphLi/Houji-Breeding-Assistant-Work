@@ -256,7 +256,7 @@ def test_search_background_literature_returns_unavailable_when_pubmed_fails(monk
     assert result["literature_source"] == "dynamic_search_unavailable"
     assert result["backend"] == "pubmed_search"
     assert result["records"] == []
-    assert len(result["queries"]) == 3
+    assert len(result["queries"]) == 6
     assert "PubMed query failed" in result["warnings"][0]
 
 
@@ -375,6 +375,24 @@ def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
         "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
     )
+    monkeypatch.setattr(
+        omics_workflow,
+        "search_background_literature",
+        lambda **kwargs: {
+            "status": "disabled_for_unit_test",
+            "backend": "mock",
+            "literature_source": "mock",
+            "used_query_plan": bool(kwargs.get("query_plan")),
+            "query_plan_count": len(kwargs.get("query_plan") or []),
+            "executed_query_count": 0,
+            "query_limit": 8,
+            "per_query_result_limit": 2,
+            "retained_record_limit": 5,
+            "queries": [],
+            "records": [],
+            "warnings": [],
+        },
+    )
     deg_dir = tmp_path / "transcriptome_deg"
     deg_dir.mkdir()
     deg_path = deg_dir / "significant_de_genes.tsv"
@@ -409,13 +427,15 @@ def test_omics_breeding_analysis_tool_impl_writes_pfam_literature_query_plan(
     assert result["summary"]["literature_query_plan_count"] > 0
     assert result["summary"]["literature_query_plan_source"] == "annotated_transcriptome_pfam"
     assert result["summary"]["background_literature_count"] == 0
-    assert result["summary"]["background_literature_status"] == "not_executed_phase_2a"
+    assert result["summary"]["background_literature_status"] == "disabled_for_unit_test"
+    assert result["summary"]["literature_query_plan_used_for_background_search"] is True
     assert "[BG1]" not in result["answer_markdown"]
     assert "待检索计划，不等同于 PubMed 文献证据" in result["analysis_prompt"]["user_prompt"]
 
     evidence_pack = json.loads((output_dir / "omics_evidence_pack.json").read_text(encoding="utf-8"))
     assert evidence_pack["background_literature_records"] == []
-    assert evidence_pack["background_literature_search"]["status"] == "not_executed_phase_2a"
+    assert evidence_pack["background_literature_search"]["status"] == "disabled_for_unit_test"
+    assert evidence_pack["literature_query_plan"]
     query_plan_path = deg_dir / "literature_query_plan.jsonl"
     assert query_plan_path.exists()
     query_plan_entries = [

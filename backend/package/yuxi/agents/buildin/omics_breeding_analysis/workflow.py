@@ -183,6 +183,22 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "literature_query_plan_source": annotation_debug.get(
             "literature_query_plan_source", ""
         ),
+        "literature_query_plan_used_for_background_search": bool(
+            background_literature_search.get("used_query_plan")
+        ),
+        "background_query_plan_count": int(
+            background_literature_search.get("query_plan_count") or 0
+        ),
+        "background_executed_query_count": int(
+            background_literature_search.get("executed_query_count") or 0
+        ),
+        "background_query_limit": int(background_literature_search.get("query_limit") or 0),
+        "background_per_query_result_limit": int(
+            background_literature_search.get("per_query_result_limit") or 0
+        ),
+        "background_retained_record_limit": int(
+            background_literature_search.get("retained_record_limit") or 0
+        ),
         "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
         "metabolome_preview_row_count": int(
             input_debug.get("metabolome_preview_row_count") or 0
@@ -263,26 +279,28 @@ def prepare_omics_evidence_pack_from_context(
     """从 Context 中的文件路径构建 Evidence Pack，并写入输出路径。"""
     # 这一步进入 evidence_adapters.py。它负责从 context 读取，然后生成基础 Evidence Pack
     evidence_pack = build_omics_evidence_pack_from_context(context)
-    # Phase 2A 只生成 query plan，不执行 PubMed 在线检索。
-    background_literature = {
-        "status": "not_executed_phase_2a",
-        "backend": "",
-        "literature_source": "query_plan_only",
-        "queries": [],
-        "records": [],
-        "warnings": [],
-    }
-    evidence_pack["background_literature_records"] = []
+    background_literature = search_background_literature(
+        trait=context.trait,
+        target_genes=evidence_pack.get("targets", {}).get("genes") or [],
+        query_plan=evidence_pack.get("literature_query_plan") or [],
+    )
+    evidence_pack["background_literature_records"] = background_literature.get("records") or []
     evidence_pack["background_literature_search"] = {
         "status": background_literature.get("status", ""),
         "backend": background_literature.get("backend", ""),
         "literature_source": background_literature.get("literature_source", ""),
+        "used_query_plan": bool(background_literature.get("used_query_plan")),
+        "query_plan_count": int(background_literature.get("query_plan_count") or 0),
+        "executed_query_count": int(background_literature.get("executed_query_count") or 0),
+        "query_limit": int(background_literature.get("query_limit") or 0),
+        "per_query_result_limit": int(background_literature.get("per_query_result_limit") or 0),
+        "retained_record_limit": int(background_literature.get("retained_record_limit") or 0),
         "queries": background_literature.get("queries") or [],
         "warning_count": len(background_literature.get("warnings") or []),
         "warnings": background_literature.get("warnings") or [],
     }
     guard_requirements = evidence_pack.setdefault("guard_requirements", {})
-    background_records = []
+    background_records = evidence_pack["background_literature_records"]
     allowed_dois = list(guard_requirements.get("allowed_dois") or [])
     allowed_quotes = list(guard_requirements.get("allowed_quoted_sentences") or [])
     for record in background_records:

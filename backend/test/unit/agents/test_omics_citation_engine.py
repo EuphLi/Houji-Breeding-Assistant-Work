@@ -438,9 +438,12 @@ def test_build_citation_result_keeps_supported_claims_for_background_and_metabol
             "title": "Background flavonoid paper",
             "pmid": "123456",
             "doi": "10.5678/bg",
-            "quoted_sentence": "Background evidence supports flavonoid accumulation differences.",
+            "abstract_sentence": "Background evidence supports flavonoid accumulation differences.",
             "source": "PubMed",
-            "query": "foxtail millet flavonoid",
+            "query_id": "PFAM_HIGH_001",
+            "query_type": "species_pfam_trait",
+            "query_priority": "high",
+            "query": 'Setaria italica "Chalcone-flavanone isomerase" flavonoid',
             "quote_scope": "abstract",
             "relevance_level": "background",
         }
@@ -626,8 +629,12 @@ def test_canonical_answer_body_uses_sentence_end_citations_and_hides_doi_before_
             "title": "Background flavonoid paper",
             "pmid": "123456",
             "doi": "10.5678/bg",
-            "quoted_sentence": "Background evidence supports flavonoid accumulation differences.",
+            "abstract_sentence": "Background evidence supports flavonoid accumulation differences.",
             "source": "PubMed",
+            "query_id": "PFAM_HIGH_001",
+            "query_type": "species_pfam_trait",
+            "query_priority": "high",
+            "query": 'Setaria italica "Chalcone-flavanone isomerase" flavonoid',
         }
     ]
 
@@ -652,7 +659,10 @@ def test_canonical_answer_body_uses_sentence_end_citations_and_hides_doi_before_
     assert "[M1] 代谢组" in source_index
     assert "[BG1] PubMed 背景文献" in source_index
     assert "DOI：10.5678/bg" in source_index
-    assert "引用原句：Background evidence supports flavonoid accumulation differences." in source_index
+    assert "摘要句：Background evidence supports flavonoid accumulation differences." in source_index
+    assert "query_id：PFAM_HIGH_001" in source_index
+    assert "query_type：species_pfam_trait" in source_index
+    assert 'query：Setaria italica "Chalcone-flavanone isomerase" flavonoid' in source_index
     assert "logFC=1.8" in source_index
     assert "padj=0.02" in source_index
     assert "注释：chalcone--flavonone isomerase" in source_index

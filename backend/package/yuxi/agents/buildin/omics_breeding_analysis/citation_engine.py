@@ -121,8 +121,10 @@ def _read_full_annotated_transcriptome_for_prompt(
 
 
 def _has_real_background_literature_evidence(record: dict[str, Any]) -> bool:
-    quoted_sentence = _as_str(record.get("quoted_sentence"))
-    if not quoted_sentence:
+    background_sentence = _as_str(record.get("quoted_sentence")) or _as_str(
+        record.get("abstract_sentence")
+    )
+    if not background_sentence:
         return False
     return any(
         _as_str(record.get(field))
@@ -326,16 +328,18 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
         if not _has_real_background_literature_evidence(record):
             continue
         quoted_sentence = _as_str(record.get("quoted_sentence"))
+        abstract_sentence = _as_str(record.get("abstract_sentence"))
         title = _as_str(record.get("title"))
         pmid = _as_str(record.get("pmid"))
         doi = _as_str(record.get("doi"))
+        display_sentence = quoted_sentence or abstract_sentence
 
         text = (
             f"PubMed 背景文献 {title or '未命名文献'} "
             f"(PMID {pmid or 'N/A'}; DOI {doi or 'N/A'})"
         )
-        if quoted_sentence:
-            text += f" 的摘要句为：{quoted_sentence}"
+        if display_sentence:
+            text += f" 的摘要句为：{display_sentence}"
 
         sources.append(
             CitationSource(
@@ -346,10 +350,14 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
                     "doi": doi,
                     "pmid": pmid,
                     "quoted_sentence": quoted_sentence,
+                    "abstract_sentence": abstract_sentence,
                     "title": title,
                     "url": _as_str(record.get("url")),
                     "source": _as_str(record.get("source")) or "PubMed",
                     "query": _as_str(record.get("query")),
+                    "query_id": _as_str(record.get("query_id")),
+                    "query_type": _as_str(record.get("query_type")),
+                    "query_priority": _as_str(record.get("query_priority")),
                     "quote_scope": _as_str(record.get("quote_scope")),
                     "relevance_level": _as_str(record.get("relevance_level")) or "background",
                 },
@@ -387,13 +395,17 @@ def build_literature_cards(sources: list[CitationSource]) -> list[dict[str, Any]
                 "doi": source.metadata.get("doi", ""),
                 "pmid": source.metadata.get("pmid", ""),
                 "quoted_sentence": source.metadata.get("quoted_sentence", ""),
-                "abstract_sentence": source.metadata.get("quoted_sentence", ""),
+                "abstract_sentence": source.metadata.get("abstract_sentence", ""),
                 "quote_scope": source.metadata.get("quote_scope", "")
                 or ("abstract" if source.source_type == "background_literature" else ""),
                 "title": source.metadata.get("title", ""),
                 "relevance_level": source.metadata.get("relevance_level", ""),
                 "source": source.metadata.get("source", "") or source.source_type,
                 "url": source.metadata.get("url", ""),
+                "query_id": source.metadata.get("query_id", ""),
+                "query_type": source.metadata.get("query_type", ""),
+                "query_priority": source.metadata.get("query_priority", ""),
+                "query": source.metadata.get("query", ""),
                 "source_file": source.metadata.get("source_file", ""),
             }
         )
@@ -823,7 +835,11 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                     f"DOI：{_as_str(metadata.get('doi')) or 'N/A'}",
                     f"PMID：{_as_str(metadata.get('pmid')) or 'N/A'}",
                     f"标题：{_as_str(metadata.get('title')) or '未提供'}",
+                    f"摘要句：{_as_str(metadata.get('abstract_sentence')) or '未提供'}",
                     f"引用原句：{_as_str(metadata.get('quoted_sentence')) or '未提供'}",
+                    f"query_id：{_as_str(metadata.get('query_id')) or 'N/A'}",
+                    f"query_type：{_as_str(metadata.get('query_type')) or 'N/A'}",
+                    f"query：{_as_str(metadata.get('query')) or 'N/A'}",
                     (
                         "证据角色：背景文献，不是当前候选基因直接证据"
                         if source.source_type == "background_literature"

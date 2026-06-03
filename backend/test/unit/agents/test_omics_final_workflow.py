@@ -194,7 +194,8 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     )
     assert result["summary"]["annotated_transcriptome_read_by_llm"] is True
     assert result["summary"]["background_literature_count"] == 0
-    assert result["summary"]["background_literature_status"] == "not_executed_phase_2a"
+    assert result["summary"]["background_literature_status"] == "disabled_for_unit_test"
+    assert result["summary"]["literature_query_plan_used_for_background_search"] is False
     assert "A1" in {item["citation_id"] for item in result["citations"]}
     assert "[A1] 基因功能注释证据" in result["answer_markdown"]
     assert "系统已将转录组 DEG 结果与用户上传功能注释文件按 gene_id 合并" in result["answer_markdown"]
@@ -219,6 +220,91 @@ def test_prepare_cited_guarded_omics_analysis_from_context_adds_annotation_a1(tm
     assert debug_annotation["citation_id"] == "A1"
     assert debug_annotation["annotation_gene_match_count"] == 1
     assert debug_annotation["candidate_annotations"][0]["gene_id"] == "GeneA"
+
+
+def test_prepare_cited_guarded_omics_analysis_from_context_uses_query_plan_for_background_pubmed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.citation_engine.load_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disable llm for unit test")),
+    )
+
+    def fake_background_search(**kwargs):
+        query_plan = kwargs.get("query_plan") or []
+        assert query_plan
+        assert query_plan[0]["query_type"] == "species_pfam_trait"
+        return {
+            "status": "completed",
+            "backend": "mock_pubmed",
+            "literature_source": "pubmed_search_with_query_plan",
+            "used_query_plan": True,
+            "query_plan_count": len(query_plan),
+            "executed_query_count": 1,
+            "query_limit": 8,
+            "per_query_result_limit": 2,
+            "retained_record_limit": 5,
+            "queries": [query_plan[0]["query"]],
+            "records": [
+                {
+                    "title": "Foxtail millet chalcone isomerase background",
+                    "pmid": "123456",
+                    "abstract_sentence": "Background evidence supports chalcone isomerase related flavonoid accumulation.",
+                    "source": "PubMed",
+                    "query_id": query_plan[0]["query_id"],
+                    "query_type": query_plan[0]["query_type"],
+                    "query_priority": query_plan[0]["priority"],
+                    "query": query_plan[0]["query"],
+                    "gene_id": query_plan[0]["gene_id"],
+                    "pfam_keyword": query_plan[0]["pfam_keyword"],
+                    "evidence_role": "background_literature",
+                    "relevance_level": "background",
+                }
+            ],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        "yuxi.agents.buildin.omics_breeding_analysis.workflow.search_background_literature",
+        fake_background_search,
+    )
+    deg_dir = tmp_path / "transcriptome_deg"
+    deg_dir.mkdir()
+    deg_path = deg_dir / "significant_de_genes.tsv"
+    deg_path.write_text(
+        "gene_id\tlogFC\tpvalue\tpadj\n"
+        "Si9g037800\t1.8\t0.003\t0.02\n",
+        encoding="utf-8",
+    )
+    annotation_path = tmp_path / "annotation.tsv"
+    annotation_path.write_text(
+        "gene_id\tpfam\tKEGG_Pathway\n"
+        "Si9g037800\tChalcone-flavanone isomerase\tFlavonoid biosynthesis\n",
+        encoding="utf-8",
+    )
+
+    context = OmicsBreedingAnalysisContext(
+        trait="黄酮相关",
+        question="根据数据给出候选验证方案",
+        transcriptome_result_path=str(deg_path),
+        annotation_path=str(annotation_path),
+        evidence_pack_output_path=str(tmp_path / "omics_evidence_pack.json"),
+    )
+
+    result = prepare_cited_guarded_omics_analysis_from_context(
+        context=context,
+        use_llamaindex=False,
+        output_dir=tmp_path,
+    )
+
+    assert result["summary"]["background_literature_count"] == 1
+    assert result["summary"]["background_literature_status"] == "completed"
+    assert result["summary"]["literature_query_plan_used_for_background_search"] is True
+    body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
+    assert "[BG1]" in body
+    assert "[BG1] PubMed 背景文献" in source_index
+    assert "query_id：" in source_index
+    assert "query_type：" in source_index
 
 
 def test_prepare_cited_guarded_omics_analysis_from_context_without_deg_does_not_emit_t1_or_smoke_gene(

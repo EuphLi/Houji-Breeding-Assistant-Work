@@ -1514,6 +1514,7 @@ def collect_annotation_evidence(
         "literature_query_plan_count": 0,
         "literature_query_plan_source": "annotated_transcriptome_pfam",
         "literature_query_plan_preview": [],
+        "literature_query_plan": [],
         "annotation_gene_match_count": 0,
         "annotation_unmatched_gene_count": len(transcriptome_records),
         "annotation_duplicate_gene_id_count": 0,
@@ -1656,6 +1657,7 @@ def collect_annotation_evidence(
         "literature_query_plan_count": len(query_plan),
         "literature_query_plan_source": "annotated_transcriptome_pfam",
         "literature_query_plan_preview": [item["query"] for item in query_plan[:8]],
+        "literature_query_plan": query_plan,
     }
     if not candidate_annotations:
         return [], metadata
@@ -1946,4 +1948,5 @@ def build_omics_evidence_pack_from_context(
             "gene_ids_preview": smoke_gene_ids[:12],
         },
     }
+    evidence_pack["literature_query_plan"] = list(annotation_metadata.get("literature_query_plan") or [])
     return evidence_pack
