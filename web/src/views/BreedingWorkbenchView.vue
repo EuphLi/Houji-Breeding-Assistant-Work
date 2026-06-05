@@ -382,6 +382,83 @@
                 下载育种建议 Markdown
               </a-button>
             </div>
+
+            <a-collapse v-if="literatureCards.length" ghost class="diagnostic-collapse">
+              <a-collapse-panel key="literature-cards" header="文献卡片 / Query 溯源">
+                <div class="provenance-card-list">
+                  <article
+                    v-for="card in literatureCards"
+                    :key="card.citation_id"
+                    class="provenance-card"
+                  >
+                    <div class="provenance-card-header">
+                      <strong>{{ card.citation_id }}</strong>
+                      <span class="provenance-badge">{{ card.evidence_role || 'literature' }}</span>
+                    </div>
+                    <div class="provenance-title">{{ card.title || '未提供标题' }}</div>
+                    <div class="provenance-grid">
+                      <div><span>PMID</span><code>{{ card.pmid || '-' }}</code></div>
+                      <div><span>DOI</span><code>{{ card.doi || '-' }}</code></div>
+                      <div><span>query_id</span><code>{{ card.query_id || '-' }}</code></div>
+                      <div><span>query_type</span><code>{{ card.query_type || '-' }}</code></div>
+                      <div><span>query_priority</span><code>{{ card.query_priority || '-' }}</code></div>
+                      <div class="full-span"><span>query</span><code>{{ card.query || '-' }}</code></div>
+                      <div class="full-span">
+                        <span>abstract / quote</span>
+                        <code>{{ card.abstract_sentence || card.quoted_sentence || '-' }}</code>
+                      </div>
+                      <div class="full-span">
+                        <span>证据边界</span>
+                        <code>{{ card.evidence_boundary || '-' }}</code>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
+
+            <a-collapse v-if="claimTraceRows.length" ghost class="diagnostic-collapse">
+              <a-collapse-panel key="claim-trace" header="逐句追溯">
+                <div class="trace-row-list">
+                  <article
+                    v-for="row in claimTraceRows"
+                    :key="row.claim_id"
+                    class="trace-row-card"
+                  >
+                    <div class="trace-row-text">{{ row.text }}</div>
+                    <div class="trace-row-meta">
+                      <span class="provenance-badge">{{ row.source_status }}</span>
+                      <code>{{ row.citation_ids.join(', ') || '-' }}</code>
+                    </div>
+                    <div
+                      v-for="source in row.sources"
+                      :key="`${row.claim_id}-${source.citation_id}`"
+                      class="trace-source"
+                    >
+                      <div class="trace-source-head">
+                        <strong>{{ source.citation_id }}</strong>
+                        <span>{{ source.source_type }}</span>
+                      </div>
+                      <div class="trace-source-body">{{ source.text }}</div>
+                      <div
+                        v-if="
+                          source.metadata?.query_id ||
+                          source.metadata?.query_type ||
+                          source.metadata?.query_priority ||
+                          source.metadata?.query
+                        "
+                        class="trace-source-provenance"
+                      >
+                        <code>query_id={{ source.metadata?.query_id || '-' }}</code>
+                        <code>query_type={{ source.metadata?.query_type || '-' }}</code>
+                        <code>query_priority={{ source.metadata?.query_priority || '-' }}</code>
+                        <code>query={{ source.metadata?.query || '-' }}</code>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
           </template>
           <div v-else-if="running" class="result-loading-state">
             <div class="result-loading-content">
@@ -688,6 +765,8 @@ const fileInputRefs = new Map()
 const frontendPayload = computed(() => result.frontendPayload || null)
 const businessSummary = computed(() => frontendPayload.value?.summary || {})
 const rawLlmOutputText = computed(() => frontendPayload.value?.debug_panel?.raw_llm_answer || '')
+const literatureCards = computed(() => frontendPayload.value?.literature_panel?.cards || [])
+const claimTraceRows = computed(() => frontendPayload.value?.claim_trace_panel?.rows || [])
 const uploadRootVirtualPath = computed(() => `/breeding-workbench/${uploadBatchId.value}`)
 const uploadedFileList = computed(() =>
   Object.entries(uploadState)
@@ -1697,6 +1776,94 @@ onMounted(async () => {
 .result-block-body,
 .artifact-pill {
   user-select: text;
+}
+
+.provenance-card-list,
+.trace-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.provenance-card,
+.trace-row-card {
+  padding: 14px 16px;
+  border: 1px solid var(--gray-100);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.provenance-card-header,
+.trace-row-meta,
+.trace-source-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.provenance-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(31, 158, 134, 0.1);
+  color: #167d73;
+  font-size: 12px;
+}
+
+.provenance-title,
+.trace-row-text {
+  margin-top: 8px;
+  color: var(--gray-1000);
+  line-height: 1.7;
+}
+
+.provenance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-top: 10px;
+
+  div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  span {
+    color: var(--gray-600);
+    font-size: 12px;
+  }
+
+  code {
+    word-break: break-word;
+  }
+
+  .full-span {
+    grid-column: 1 / -1;
+  }
+}
+
+.trace-source {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--gray-100);
+}
+
+.trace-source-head {
+  color: var(--gray-700);
+}
+
+.trace-source-body {
+  margin-top: 6px;
+  color: var(--gray-900);
+  line-height: 1.6;
+}
+
+.trace-source-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .file-chip-list {

@@ -47,6 +47,7 @@
 - 补充育种工作台 Phase 2A 检索计划层：从 `significant_de_genes.annotated.tsv` 的 `pfam`/`Pfam_Description` 等字段提取 Pfam/domain 关键词，与物种、性状、通路和候选基因组合生成 `literature_query_plan.jsonl`；当前只生成待检索 query plan，不执行 PubMed 在线检索，也不把这些 query 视为文献证据。
 - 收紧 Phase 2A.1 query plan 清洗：`species_pfam_pathway` 仅保留可读的 pathway/function 词用于高优先级 query，过滤 `LSE*`、`K*`、`ko*`、`E*.*.*.*`、URL 等低价值编号；同时把 `pathway_ids`、`ko_terms`、`go_ids`、`pfam_ids` 作为 metadata 保留，并为 high/medium/low/fallback query 数量设置上限。
 - 接入 Phase 2B PubMed 背景检索：`literature_query_plan.jsonl` 现在会优先驱动背景文献搜索，按 `high -> medium -> low -> fallback` 顺序执行并限制查询/返回数量；只有真实 PubMed records 才进入 `background_literature_records` 并生成 BG citation，query plan 本身继续保持 `is_evidence=false`。
+- 补齐育种工作台 Phase 2D 分层自适应 PubMed 回退检索：背景文献搜索不再简单截断排序后前 N 条 query，而是按 `high(4) -> medium(2) -> low(1) -> fallback(2)` 分层预算执行并在每层去重后判断是否达到目标记录数；当高优先级查询无结果时，medium 和 fallback 现在仍可获得执行机会，搜索结果也会落盘 `executed_query_details`、`fallback_executed`、`stop_reason` 等调试字段，便于定位真实在线检索为何无结果。
 - 修复育种工作台正式上传链路的两处污染源：转录组固定流程在调用 `run_smoke_de_pipeline.sh` 前会先规范化 `sampleName_clientId.txt`，对显式 `group` 列额外生成旧脚本可识别的 `compatible_sampleName_clientId.txt`，把任意两组 group 映射到 `*_LM/*_JM` 并写入 `run.log/manifest`；正式 `omics_breeding_analysis_run` 不再在当前 run 缺少 DEG 证据时从 smoke/demo 默认基因回填 `Si9g037800`，候选基因仅来自本次 `upload_root/transcriptome_deg/significant_de_genes.tsv`。
 - 调整知识库思维导图后端结构：将思维导图路由文件重命名为知识库语义更明确的 router，并把文件列表整理、提示词构建、AI JSON 解析等纯逻辑下沉到知识库 utils。
 - 收敛知识库评估后端结构：将评估指标、单题评估、答案生成提示词和自动基准生成算法下沉到 `knowledge/eval`，`EvaluationService` 保留任务、文件和持久化编排职责。

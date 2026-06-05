@@ -264,9 +264,33 @@ def test_prepare_cited_guarded_omics_analysis_from_context_uses_query_plan_for_b
             "used_query_plan": True,
             "query_plan_count": len(query_plan),
             "executed_query_count": 1,
-            "query_limit": 8,
+            "unexecuted_query_count": max(0, len(query_plan) - 1),
+            "query_limit": 9,
+            "desired_record_count": 5,
             "per_query_result_limit": 2,
             "retained_record_limit": 5,
+            "priority_budgets": {"high": 4, "medium": 2, "low": 1, "fallback": 2},
+            "priority_execution_counts": {"high": 1, "medium": 0, "low": 0, "fallback": 0},
+            "priority_plan_counts": {
+                "high": len([item for item in query_plan if item["priority"] == "high"]),
+                "medium": len([item for item in query_plan if item["priority"] == "medium"]),
+                "low": len([item for item in query_plan if item["priority"] == "low"]),
+                "fallback": len([item for item in query_plan if item["priority"] == "fallback"]),
+            },
+            "executed_query_details": [
+                {
+                    "query_id": query_plan[0]["query_id"],
+                    "query_type": query_plan[0]["query_type"],
+                    "priority": query_plan[0]["priority"],
+                    "query": query_plan[0]["query"],
+                    "status": "completed",
+                    "raw_result_count": 1,
+                    "retained_new_record_count": 1,
+                }
+            ],
+            "skipped_query_count": max(0, len(query_plan) - 1),
+            "fallback_executed": False,
+            "stop_reason": "priority_budgets_exhausted",
             "queries": [query_plan[0]["query"]],
             "records": [
                 {
@@ -324,11 +348,40 @@ def test_prepare_cited_guarded_omics_analysis_from_context_uses_query_plan_for_b
     assert result["summary"]["background_literature_count"] == 1
     assert result["summary"]["background_literature_status"] == "completed"
     assert result["summary"]["literature_query_plan_used_for_background_search"] is True
+    assert result["summary"]["background_query_plan_count"] == result["summary"]["literature_query_plan_count"]
+    assert result["summary"]["background_executed_query_count"] == 1
+    assert result["summary"]["background_unexecuted_query_count"] == result["summary"]["literature_query_plan_count"] - 1
+    assert result["summary"]["background_fallback_executed"] is False
+    assert result["summary"]["background_stop_reason"] == "priority_budgets_exhausted"
+    assert result["summary"]["background_priority_budgets"] == {
+        "high": 4,
+        "medium": 2,
+        "low": 1,
+        "fallback": 2,
+    }
+    assert result["frontend_payload"]["debug_panel"]["executed_query_count"] == 1
+    assert result["frontend_payload"]["debug_panel"]["query_plan_count"] == result["summary"]["literature_query_plan_count"]
+    assert result["frontend_payload"]["debug_panel"]["unexecuted_query_count"] == result["summary"]["literature_query_plan_count"] - 1
+    assert result["frontend_payload"]["debug_panel"]["fallback_executed"] is False
+    assert result["frontend_payload"]["debug_panel"]["priority_budgets"] == {
+        "high": 4,
+        "medium": 2,
+        "low": 1,
+        "fallback": 2,
+    }
+    assert result["frontend_payload"]["debug_panel"]["background_literature_record_count"] == 1
+    assert result["frontend_payload"]["debug_panel"]["stop_reason"] == "priority_budgets_exhausted"
     body, source_index = result["answer_markdown"].split("## 来源索引", maxsplit=1)
     assert "[BG1]" in body
     assert "[BG1] PubMed 背景文献" in source_index
     assert "query_id：" in source_index
     assert "query_type：" in source_index
+    assert "query_priority：high" in source_index
+    assert "evidence_role：background_literature" in source_index
+    assert "证据边界：背景文献，不是当前实验直接验证" in source_index
+    assert result["literature_cards"][0]["query_id"] == "PFAM_HIGH_001"
+    assert result["literature_cards"][0]["query_type"] == "species_pfam_trait"
+    assert result["literature_cards"][0]["query_priority"] == "high"
 
 
 def test_prepare_cited_guarded_omics_analysis_from_context_without_deg_does_not_emit_t1_or_smoke_gene(

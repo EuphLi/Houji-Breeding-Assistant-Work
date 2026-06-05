@@ -360,6 +360,8 @@ def build_citation_sources(evidence_pack: dict[str, Any]) -> list[CitationSource
                     "query_priority": _as_str(record.get("query_priority")),
                     "quote_scope": _as_str(record.get("quote_scope")),
                     "relevance_level": _as_str(record.get("relevance_level")) or "background",
+                    "evidence_role": _as_str(record.get("evidence_role")) or "background_literature",
+                    "evidence_boundary": "背景文献，不是当前实验直接验证",
                 },
             )
         )
@@ -406,6 +408,18 @@ def build_literature_cards(sources: list[CitationSource]) -> list[dict[str, Any]
                 "query_type": source.metadata.get("query_type", ""),
                 "query_priority": source.metadata.get("query_priority", ""),
                 "query": source.metadata.get("query", ""),
+                "evidence_role": source.metadata.get("evidence_role", "")
+                or (
+                    "background_literature"
+                    if source.source_type == "background_literature"
+                    else "literature_support"
+                ),
+                "evidence_boundary": source.metadata.get("evidence_boundary", "")
+                or (
+                    "背景文献，不是当前实验直接验证"
+                    if source.source_type == "background_literature"
+                    else "文献支持线索，需与当前实验结果分开解读"
+                ),
                 "source_file": source.metadata.get("source_file", ""),
             }
         )
@@ -839,11 +853,13 @@ def _build_source_index_sections(sources: list[CitationSource]) -> list[str]:
                     f"引用原句：{_as_str(metadata.get('quoted_sentence')) or '未提供'}",
                     f"query_id：{_as_str(metadata.get('query_id')) or 'N/A'}",
                     f"query_type：{_as_str(metadata.get('query_type')) or 'N/A'}",
+                    f"query_priority：{_as_str(metadata.get('query_priority')) or 'N/A'}",
                     f"query：{_as_str(metadata.get('query')) or 'N/A'}",
+                    f"evidence_role：{_as_str(metadata.get('evidence_role')) or ('background_literature' if source.source_type == 'background_literature' else 'literature_support')}",
                     (
-                        "证据角色：背景文献，不是当前候选基因直接证据"
+                        f"证据边界：{_as_str(metadata.get('evidence_boundary')) or '背景文献，不是当前候选基因直接证据'}"
                         if source.source_type == "background_literature"
-                        else "证据角色：文献支持线索，需与当前实验结果分开解读"
+                        else f"证据边界：{_as_str(metadata.get('evidence_boundary')) or '文献支持线索，需与当前实验结果分开解读'}"
                     ),
                     "",
                 ]

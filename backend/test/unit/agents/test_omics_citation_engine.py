@@ -75,13 +75,37 @@ def test_build_citation_sources_from_evidence_pack():
 
 # 测试验证 literature source 能转成前端文献卡片
 def test_build_literature_cards_from_sources():
-    sources = build_citation_sources(_sample_evidence_pack())
+    pack = _sample_evidence_pack()
+    pack["background_literature_records"] = [
+        {
+            "citation_id": "BG1",
+            "title": "Background flavonoid paper",
+            "pmid": "123456",
+            "doi": "10.5678/bg",
+            "abstract_sentence": "Background evidence supports flavonoid accumulation differences.",
+            "source": "PubMed",
+            "query_id": "PFAM_HIGH_001",
+            "query_type": "species_pfam_trait",
+            "query_priority": "high",
+            "query": 'Setaria italica "chalcone isomerase" flavonoid',
+            "evidence_role": "background_literature",
+        }
+    ]
+    sources = build_citation_sources(pack)
     cards = build_literature_cards(sources)
 
-    assert len(cards) == 1
+    assert len(cards) == 2
     assert cards[0]["citation_id"] == "L1"
     assert cards[0]["doi"] == "10.1234/real"
     assert cards[0]["quoted_sentence"] == "Verified sentence."
+    assert cards[1]["citation_id"] == "BG1"
+    assert cards[1]["pmid"] == "123456"
+    assert cards[1]["query_id"] == "PFAM_HIGH_001"
+    assert cards[1]["query_type"] == "species_pfam_trait"
+    assert cards[1]["query_priority"] == "high"
+    assert cards[1]["query"] == 'Setaria italica "chalcone isomerase" flavonoid'
+    assert cards[1]["evidence_role"] == "background_literature"
+    assert cards[1]["evidence_boundary"] == "背景文献，不是当前实验直接验证"
 
 
 # 测试验证 fallback citation result 能生成用户正文和结构化 citation 结果。
@@ -668,10 +692,22 @@ def test_canonical_answer_body_uses_sentence_end_citations_and_hides_doi_before_
     assert "摘要句：Background evidence supports flavonoid accumulation differences." in source_index
     assert "query_id：PFAM_HIGH_001" in source_index
     assert "query_type：species_pfam_trait" in source_index
+    assert "query_priority：high" in source_index
     assert 'query：Setaria italica "Chalcone-flavanone isomerase" flavonoid' in source_index
+    assert "evidence_role：background_literature" in source_index
+    assert "证据边界：背景文献，不是当前实验直接验证" in source_index
     assert "logFC=1.8" in source_index
     assert "padj=0.02" in source_index
     assert "注释：chalcone--flavonone isomerase" in source_index
+
+    background_row = next(row for row in result["claim_trace"] if "BG1" in row["citation_ids"])
+    background_source = next(
+        source for source in build_literature_cards(build_citation_sources(evidence_pack))
+        if source["citation_id"] == "BG1"
+    )
+    assert background_source["query_id"] == "PFAM_HIGH_001"
+    assert background_source["query_type"] == "species_pfam_trait"
+    assert background_source["query_priority"] == "high"
 
 
 def test_claim_trace_excludes_source_index_and_only_tracks_real_claims():

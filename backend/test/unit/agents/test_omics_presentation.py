@@ -37,6 +37,23 @@ def test_build_frontend_payload_groups_final_result_for_display():
                 "text": "Literature evidence.",
                 "metadata": {"doi": "10.1234/real"},
             },
+            {
+                "citation_id": "BG1",
+                "source_type": "background_literature",
+                "text": "Background evidence.",
+                "metadata": {
+                    "title": "Background flavonoid paper",
+                    "pmid": "123456",
+                    "doi": "10.5678/bg",
+                    "abstract_sentence": "Background evidence supports flavonoid accumulation differences.",
+                    "query_id": "PFAM_HIGH_001",
+                    "query_type": "species_pfam_trait",
+                    "query_priority": "high",
+                    "query": 'Setaria italica "chalcone isomerase" flavonoid',
+                    "evidence_role": "background_literature",
+                    "evidence_boundary": "背景文献，不是当前实验直接验证",
+                },
+            },
         ],
         "literature_cards": [
             {
@@ -44,13 +61,26 @@ def test_build_frontend_payload_groups_final_result_for_display():
                 "doi": "10.1234/real",
                 "quoted_sentence": "Verified sentence.",
                 "title": "Verified Paper",
-            }
+            },
+            {
+                "citation_id": "BG1",
+                "pmid": "123456",
+                "doi": "10.5678/bg",
+                "title": "Background flavonoid paper",
+                "abstract_sentence": "Background evidence supports flavonoid accumulation differences.",
+                "query_id": "PFAM_HIGH_001",
+                "query_type": "species_pfam_trait",
+                "query_priority": "high",
+                "query": 'Setaria italica "chalcone isomerase" flavonoid',
+                "evidence_role": "background_literature",
+                "evidence_boundary": "背景文献，不是当前实验直接验证",
+            },
         ],
         "claim_trace": [
             {
                 "claim_id": "C1",
                 "text": "GeneA 是候选基因 [T1]",
-                "citation_ids": ["T1"],
+                "citation_ids": ["T1", "BG1"],
                 "source_status": "supported",
             },
             {
@@ -82,14 +112,22 @@ def test_build_frontend_payload_groups_final_result_for_display():
     assert payload["answer_markdown"] == "GeneA 是候选基因。[T1]"
     assert payload["raw_llm_answer"] == "raw llm body"
 
-    assert payload["citation_panel"]["citation_count"] == 2
-    assert payload["literature_panel"]["card_count"] == 1
+    assert payload["citation_panel"]["citation_count"] == 3
+    assert payload["literature_panel"]["card_count"] == 2
 
     assert payload["claim_trace_panel"]["row_count"] == 2
     assert payload["claim_trace_panel"]["supported_count"] == 1
     assert payload["claim_trace_panel"]["needs_citation_count"] == 1
     assert payload["claim_trace_panel"]["rows"][0]["sources"][0]["citation_id"] == "T1"
+    assert payload["claim_trace_panel"]["rows"][0]["sources"][1]["citation_id"] == "BG1"
+    assert (
+        payload["claim_trace_panel"]["rows"][0]["sources"][1]["metadata"]["query_id"]
+        == "PFAM_HIGH_001"
+    )
     assert payload["claim_trace_panel"]["rows"][1]["explanation"] == "关键结论句缺少 citation id。"
+    assert payload["literature_panel"]["cards"][1]["query_priority"] == "high"
+    assert payload["literature_panel"]["cards"][1]["evidence_boundary"] == "背景文献，不是当前实验直接验证"
+    assert payload["citation_panel"]["citations"][2]["metadata"]["query_type"] == "species_pfam_trait"
 
     assert payload["guard_panel"]["passed"] is True
 

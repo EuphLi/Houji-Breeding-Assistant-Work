@@ -193,13 +193,28 @@ def summarize_evidence_pack(evidence_pack: dict[str, Any]) -> dict[str, Any]:
         "background_executed_query_count": int(
             background_literature_search.get("executed_query_count") or 0
         ),
+        "background_unexecuted_query_count": int(
+            background_literature_search.get("unexecuted_query_count") or 0
+        ),
         "background_query_limit": int(background_literature_search.get("query_limit") or 0),
+        "background_desired_record_count": int(
+            background_literature_search.get("desired_record_count") or 0
+        ),
         "background_per_query_result_limit": int(
             background_literature_search.get("per_query_result_limit") or 0
         ),
         "background_retained_record_limit": int(
             background_literature_search.get("retained_record_limit") or 0
         ),
+        "background_fallback_executed": bool(
+            background_literature_search.get("fallback_executed")
+        ),
+        "background_stop_reason": background_literature_search.get("stop_reason", ""),
+        "background_priority_budgets": background_literature_search.get("priority_budgets") or {},
+        "background_priority_execution_counts": background_literature_search.get(
+            "priority_execution_counts"
+        )
+        or {},
         "metabolome_preview_available": bool(input_debug.get("metabolome_preview_available")),
         "metabolome_preview_row_count": int(
             input_debug.get("metabolome_preview_row_count") or 0
@@ -298,9 +313,18 @@ def prepare_omics_evidence_pack_from_context(
         "used_query_plan": bool(background_literature.get("used_query_plan")),
         "query_plan_count": int(background_literature.get("query_plan_count") or 0),
         "executed_query_count": int(background_literature.get("executed_query_count") or 0),
+        "unexecuted_query_count": int(background_literature.get("unexecuted_query_count") or 0),
         "query_limit": int(background_literature.get("query_limit") or 0),
+        "desired_record_count": int(background_literature.get("desired_record_count") or 0),
         "per_query_result_limit": int(background_literature.get("per_query_result_limit") or 0),
         "retained_record_limit": int(background_literature.get("retained_record_limit") or 0),
+        "priority_budgets": background_literature.get("priority_budgets") or {},
+        "priority_execution_counts": background_literature.get("priority_execution_counts") or {},
+        "priority_plan_counts": background_literature.get("priority_plan_counts") or {},
+        "executed_query_details": background_literature.get("executed_query_details") or [],
+        "skipped_query_count": int(background_literature.get("skipped_query_count") or 0),
+        "fallback_executed": bool(background_literature.get("fallback_executed")),
+        "stop_reason": background_literature.get("stop_reason", ""),
         "queries": background_literature.get("queries") or [],
         "warning_count": len(background_literature.get("warnings") or []),
         "warnings": background_literature.get("warnings") or [],

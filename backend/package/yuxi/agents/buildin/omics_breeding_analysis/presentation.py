@@ -47,8 +47,31 @@ def _build_debug_evidence_context(citations: list[Any]) -> dict[str, Any]:
     """
 
     annotation_items: list[dict[str, Any]] = []
+    literature_items: list[dict[str, Any]] = []
     for item in citations:
-        if not isinstance(item, dict) or item.get("source_type") != "annotation":
+        if not isinstance(item, dict):
+            continue
+        if item.get("source_type") in {"literature", "background_literature"}:
+            metadata = item.get("metadata") or {}
+            literature_items.append(
+                {
+                    "citation_id": item.get("citation_id", ""),
+                    "source_type": item.get("source_type", ""),
+                    "title": metadata.get("title", ""),
+                    "doi": metadata.get("doi", ""),
+                    "pmid": metadata.get("pmid", ""),
+                    "quoted_sentence": metadata.get("quoted_sentence", ""),
+                    "abstract_sentence": metadata.get("abstract_sentence", ""),
+                    "query_id": metadata.get("query_id", ""),
+                    "query_type": metadata.get("query_type", ""),
+                    "query_priority": metadata.get("query_priority", ""),
+                    "query": metadata.get("query", ""),
+                    "evidence_role": metadata.get("evidence_role", ""),
+                    "evidence_boundary": metadata.get("evidence_boundary", ""),
+                }
+            )
+            continue
+        if item.get("source_type") != "annotation":
             continue
         metadata = item.get("metadata") or {}
         annotation_items.append(
@@ -76,6 +99,7 @@ def _build_debug_evidence_context(citations: list[Any]) -> dict[str, Any]:
 
     return {
         "annotation": annotation_items,
+        "literature": literature_items,
     }
 
 
@@ -201,6 +225,15 @@ def build_frontend_payload(final_result: dict[str, Any]) -> dict[str, Any]:
             "evidence_pack_path": evidence_pack_path,
             "omics_evidence_pack_path": evidence_pack_path,
             "evidence_pack_path_exists": bool(evidence_pack_path) and Path(evidence_pack_path).is_file(),
+            "query_plan_count": int(summary.get("background_query_plan_count") or 0),
+            "executed_query_count": int(summary.get("background_executed_query_count") or 0),
+            "unexecuted_query_count": int(summary.get("background_unexecuted_query_count") or 0),
+            "fallback_executed": bool(summary.get("background_fallback_executed")),
+            "priority_budgets": summary.get("background_priority_budgets") or {},
+            "background_literature_record_count": int(
+                summary.get("background_literature_record_count") or 0
+            ),
+            "stop_reason": summary.get("background_stop_reason", ""),
             "evidence_context": _build_debug_evidence_context(citations),
         },
     }
